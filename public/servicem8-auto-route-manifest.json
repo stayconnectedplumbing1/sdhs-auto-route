@@ -1,0 +1,28 @@
+{
+  "name": "Auto Route",
+  "version": "4.3",
+  "iconURL": "https://same-day-intelligent-dispatch.hello151759.chatgpt.site/auto-route-icon.png",
+  "supportURL": "https://samedayhomeservices.com.au",
+  "supportEmail": "hello@samedayhomeservices.com.au",
+  "oauth": {
+    "scope": "read_jobs manage_jobs read_schedule manage_schedule read_staff read_customers staff_locations read_job_queues"
+  },
+  "actions": [
+    {
+      "name": "Auto Route This Job",
+      "type": "online",
+      "entity": "job",
+      "iconURL": "https://same-day-intelligent-dispatch.hello151759.chatgpt.site/auto-route-icon.png",
+      "event": "open_auto_route_job",
+      "location": "window"
+    }
+  ],
+  "menuItems": [
+    {
+      "name": "Auto Route Dashboard",
+      "type": "addon",
+      "iconURL": "https://same-day-intelligent-dispatch.hello151759.chatgpt.site/auto-route-icon.png",
+      "event": "open_auto_route_dashboard"
+    }
+  ]
+}
