@@ -1,16 +1,8 @@
 import { cookies } from "next/headers";
+import { exchangeServiceM8Code } from "@/lib/servicem8/oauth";
+import { storeConnectedBusinessToken } from "@/lib/servicem8/token-store";
 
 export const dynamic = "force-dynamic";
-
-const TOKEN_URL = "https://go.servicem8.com/oauth/access_token";
-
-function requiredEnv(name: string) {
-  const value = process.env[name];
-  if (!value) {
-    throw new Error(`${name} is not configured`);
-  }
-  return value;
-}
 
 export async function GET(request: Request) {
   const url = new URL(request.url);
@@ -26,34 +18,18 @@ export async function GET(request: Request) {
   }
 
   try {
-    const clientId = requiredEnv("SERVICEM8_CLIENT_ID");
-    const clientSecret = requiredEnv("SERVICEM8_CLIENT_SECRET");
-    const redirectUri = requiredEnv("SERVICEM8_REDIRECT_URI");
+    const tokenPayload = await exchangeServiceM8Code(code);
+    const business = await storeConnectedBusinessToken(tokenPayload);
 
-    const body = new URLSearchParams();
-    body.set("grant_type", "authorization_code");
-    body.set("code", code);
-    body.set("client_id", clientId);
-    body.set("client_secret", clientSecret);
-    body.set("redirect_uri", redirectUri);
-
-    const tokenResponse = await fetch(TOKEN_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body,
-    });
-
-    const tokenPayload = await tokenResponse.json().catch(() => null);
-
-    if (!tokenResponse.ok) {
-      return Response.json(
-        { ok: false, error: "ServiceM8 token exchange failed", details: tokenPayload },
-        { status: 502 }
-      );
-    }
-
-    // Next step: store tokenPayload securely against the connected ServiceM8 account.
-    return Response.redirect(new URL("/?connected=servicem8", request.url).toString(), 302);
+    const response = Response.redirect(
+      new URL(`/onboarding?connected=${business.id}`, request.url).toString(),
+      302
+    );
+    response.headers.append(
+      "Set-Cookie",
+      "servicem8_oauth_state=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0"
+    );
+    return response;
   } catch (error) {
     return Response.json(
       { ok: false, error: error instanceof Error ? error.message : "ServiceM8 callback error" },
