@@ -1221,7 +1221,7 @@ function JobCardDecision({ job, jobs, techs, mapsKey, connected, syncing, sync, 
             <div><small>REQUIRED SKILL</small><b>{job.requiredSkill}</b></div>
             <div><small>REQUIRED TOOL</small><b>{job.requiredTool || "No special tool"}</b></div>
             <div><small>JOB DURATION</small><b>{job.duration} minutes</b></div>
-            <div><small>BOOKING RULE</small><b>{job.priority === "Urgent" ? "Same day — next realistic slot" : sameDayRequested ? `Customer requested today · ${customerRequestedWindow(job).label}` : job.holdingWindow || job.bookingDay}</b></div>
+            <div><small>BOOKING RULE</small><b>{job.priority === "Urgent" ? "Same day — next realistic slot" : sameDayRequested ? "Customer requested today · closest practical tech today" : job.holdingWindow || job.bookingDay}</b></div>
           </div>
           <div className="decision-tech-list">{scores.map((score, index) => {
             const dayJobs = jobs.filter(item => item.techId === score.tech.id && item.id !== job.id && jobDateKey(item) === jobDateKey(job));
