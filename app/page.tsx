@@ -435,7 +435,6 @@ function recommendation(tech: Technician, job: Job, jobs: Job[], options: Recomm
   const sameDayStandard = job.priority !== "Urgent"
     && (options.sameDayRequested === true || jobDateKey(job) === sydneyDateKey());
   const sameDaySlot = sameDayStandard ? sameDayStandardSlot(tech, job, dayJobs) : null;
-  if (sameDayStandard && !sameDaySlot) return { eligible: false, score: 0, eta: 0, reason: "No safe same-day gap before 5:00 PM", requiresMove: false, moveJob: null as Job | null };
   const moveJob = null as Job | null;
   const previous = [...dayJobs].sort((a, b) => b.order - a.order)[0];
   const from = previous ? SUBURBS[previous.suburb] || tech : HOME[tech.home] || tech;
@@ -467,9 +466,13 @@ function recommendation(tech: Technician, job: Job, jobs: Job[], options: Recomm
   const reason = sameDaySlot
     ? sameDayGapReason
     : assigned === 0
-        ? `Starts from ${tech.home}`
+        ? sameDayStandard
+          ? `Closest practical same-day route · available after travel from ${tech.home}`
+          : `Starts from ${tech.home}`
         : job.priority === "Urgent"
           ? `${urgentReason} · ${assigned} job${assigned === 1 ? "" : "s"} already booked`
+          : sameDayStandard
+            ? `Closest practical same-day route · next available after current run · ${assigned} job${assigned === 1 ? "" : "s"} already booked`
           : `${assigned} booked · adds to the existing run without backtracking`;
   const slotEta = sameDaySlot ? Math.max(0, Math.ceil((sameDaySlot.start.getTime() - Date.now()) / 60000)) : remainingMinutes + travelMinutes;
   return { eligible: true, score, eta: slotEta, reason, requiresMove: !!moveJob, moveJob, plannedStart: sameDaySlot?.start || null, plannedEnd: sameDaySlot?.end || null };
@@ -710,7 +713,7 @@ export default function Home() {
     const order = options.plannedRoute && job.plannedOrder
       ? job.plannedOrder
       : job.priority === "Urgent" ? 1 : sameDay.length + 1;
-    const respectAllocation = Boolean(job.holdingWindow);
+    const respectAllocation = Boolean(job.holdingWindow) && !sameDayRequested;
     const allocationStart = job.holdingWindow ? new Date(`${jobDateKey(job)}T${job.holdingWindow === "AM 8-11" ? "08:00:00" : "12:00:00"}`) : null;
     const plannedStart = parseServiceM8Date(job.scheduledStart);
     const plannedEnd = parseServiceM8Date(job.scheduledEnd);
@@ -723,7 +726,7 @@ export default function Home() {
       : (job.priority === "Urgent" || !job.scheduledStart)
       ? roundUpToQuarterHour(new Date(Date.now() + (job.priority === "Urgent" ? routeCheck.eta : 5) * 60000))
       : roundUpToQuarterHour(plannedStart || new Date());
-    const bookingDuration = 30;
+    const bookingDuration = Math.max(30, job.duration || 30);
     let end = sameDayRequested && sameDayEnd
       ? sameDayEnd
       : bookingEnd(start, (respectAllocation || (job.priority !== "Urgent" && job.scheduledEnd)) ? plannedEnd : null, bookingDuration);
