@@ -239,6 +239,8 @@ function sameDayStandardSlot(tech: Technician, job: Job, jobs: Job[], now = new 
   const dateKey = jobDateKey(job);
   const windowStart = new Date(`${dateKey}T${String(requested.startHour).padStart(2, "0")}:00:00`);
   const windowEnd = new Date(`${dateKey}T${String(requested.endHour).padStart(2, "0")}:00:00`);
+  const dayEnd = new Date(`${dateKey}T17:00:00`);
+  const durationMinutes = Math.max(30, job.duration || 30);
   const initialTravel = Math.max(10, Math.round(liveDistance(tech, job, distance(routePoint(tech), routePoint(job))) * 1.7));
   let cursor = roundUpToQuarterHour(new Date(Math.max(windowStart.getTime(), now.getTime() + initialTravel * 60000)));
   const existing = jobs
@@ -246,18 +248,41 @@ function sameDayStandardSlot(tech: Technician, job: Job, jobs: Job[], now = new 
     .map(item => ({ job: item, window: scheduledWindow(item) }))
     .filter((item): item is { job: Job; window: { start: Date; end: Date } } => Boolean(item.window))
     .sort((a, b) => a.window.start.getTime() - b.window.start.getTime());
+
+  const findSlotBefore = (latestEnd: Date) => {
+    for (const item of existing) {
+      if (item.window.end.getTime() <= cursor.getTime()) continue;
+      const candidateEnd = new Date(cursor.getTime() + durationMinutes * 60000);
+      if (candidateEnd.getTime() <= item.window.start.getTime() - 15 * 60000 && candidateEnd.getTime() <= latestEnd.getTime()) {
+        return { start: cursor, end: candidateEnd, requested };
+      }
+      const onwardTravel = Math.max(10, Math.round(distance(routePoint(item.job), routePoint(job)) * 1.7));
+      cursor = roundUpToQuarterHour(new Date(item.window.end.getTime() + (15 + onwardTravel) * 60000));
+      if (cursor.getTime() >= latestEnd.getTime()) return null;
+    }
+    const end = new Date(cursor.getTime() + durationMinutes * 60000);
+    return end.getTime() <= latestEnd.getTime() ? { start: cursor, end, requested } : null;
+  };
+
+  const preferredSlot = findSlotBefore(windowEnd);
+  if (preferredSlot) return preferredSlot;
+
+  // Customer-requested same-day is a practical dispatch decision. Prefer the
+  // customer’s requested window, but do not hide all options if the first safe
+  // non-overlapping slot is later today.
+  cursor = roundUpToQuarterHour(new Date(Math.max(windowEnd.getTime(), now.getTime() + initialTravel * 60000)));
   for (const item of existing) {
     if (item.window.end.getTime() <= cursor.getTime()) continue;
-    const candidateEnd = new Date(cursor.getTime() + 30 * 60000);
-    if (candidateEnd.getTime() <= item.window.start.getTime() - 15 * 60000 && candidateEnd.getTime() <= windowEnd.getTime()) {
+    const candidateEnd = new Date(cursor.getTime() + durationMinutes * 60000);
+    if (candidateEnd.getTime() <= item.window.start.getTime() - 15 * 60000 && candidateEnd.getTime() <= dayEnd.getTime()) {
       return { start: cursor, end: candidateEnd, requested };
     }
     const onwardTravel = Math.max(10, Math.round(distance(routePoint(item.job), routePoint(job)) * 1.7));
     cursor = roundUpToQuarterHour(new Date(item.window.end.getTime() + (15 + onwardTravel) * 60000));
-    if (cursor.getTime() >= windowEnd.getTime()) return null;
+    if (cursor.getTime() >= dayEnd.getTime()) return null;
   }
-  const end = new Date(cursor.getTime() + 30 * 60000);
-  return end.getTime() <= windowEnd.getTime() ? { start: cursor, end, requested } : null;
+  const end = new Date(cursor.getTime() + durationMinutes * 60000);
+  return end.getTime() <= dayEnd.getTime() ? { start: cursor, end, requested } : null;
 }
 
 function isActionRequiredJob(job: Job) {
@@ -410,7 +435,7 @@ function recommendation(tech: Technician, job: Job, jobs: Job[], options: Recomm
   const sameDayStandard = job.priority !== "Urgent"
     && (options.sameDayRequested === true || jobDateKey(job) === sydneyDateKey());
   const sameDaySlot = sameDayStandard ? sameDayStandardSlot(tech, job, dayJobs) : null;
-  if (sameDayStandard && !sameDaySlot) return { eligible: false, score: 0, eta: 0, reason: `No free 30-minute gap inside ${customerRequestedWindow(job).label}`, requiresMove: false, moveJob: null as Job | null };
+  if (sameDayStandard && !sameDaySlot) return { eligible: false, score: 0, eta: 0, reason: "No safe same-day gap before 5:00 PM", requiresMove: false, moveJob: null as Job | null };
   const moveJob = null as Job | null;
   const previous = [...dayJobs].sort((a, b) => b.order - a.order)[0];
   const from = previous ? SUBURBS[previous.suburb] || tech : HOME[tech.home] || tech;
@@ -433,8 +458,14 @@ function recommendation(tech: Technician, job: Job, jobs: Job[], options: Recomm
   const urgentReason = activeBooking?.window
     ? `Available after job #${activeBooking.job.id} finishes at ${timeLabel(activeBooking.window.end)}`
     : "Available now — closest realistic arrival";
+  const requestedWindowEnd = sameDaySlot ? new Date(`${jobDateKey(job)}T${String(sameDaySlot.requested.endHour).padStart(2, "0")}:00:00`) : null;
+  const sameDayGapReason = sameDaySlot
+    ? sameDaySlot.start.getTime() <= (requestedWindowEnd?.getTime() || 0)
+      ? `Closest practical same-day route · gap ${timeLabel(sameDaySlot.start)}–${timeLabel(sameDaySlot.end)} · ${assigned} job${assigned === 1 ? "" : "s"} already booked`
+      : `Closest practical same-day route · first safe gap after ${sameDaySlot.requested.label}: ${timeLabel(sameDaySlot.start)}–${timeLabel(sameDaySlot.end)} · ${assigned} job${assigned === 1 ? "" : "s"} already booked`
+    : "";
   const reason = sameDaySlot
-    ? `Closest eligible route · gap ${timeLabel(sameDaySlot.start)}–${timeLabel(sameDaySlot.end)} · ${assigned} job${assigned === 1 ? "" : "s"} already booked`
+    ? sameDayGapReason
     : assigned === 0
         ? `Starts from ${tech.home}`
         : job.priority === "Urgent"
@@ -1182,7 +1213,7 @@ function JobCardDecision({ job, jobs, techs, mapsKey, connected, syncing, sync, 
 
       <div className="decision-grid">
         <section className="decision-ranking">
-          <header><div><small>RECOMMENDATION</small><h2>{reassignMode ? "Closest replacement technicians" : job.priority === "Urgent" || sameDayRequested ? "Closest eligible technicians" : "Best technicians for this route"}</h2><p>{reassignMode ? `${assignedTech?.name || "The current technician"} is excluded. Ranked by live location and the earliest realistic non-overlapping gap.` : job.priority === "Urgent" || sameDayRequested ? "Ranked by the closest realistic arrival after checking live location, current-job duration, skills, tools and a non-overlapping gap." : "Ranked using live location, current bookings, skills, tools, travel and daily capacity."}</p></div><span>{scores.filter(score => score.eligible).length} eligible</span></header>
+          <header><div><small>RECOMMENDATION</small><h2>{reassignMode ? "Closest replacement technicians" : job.priority === "Urgent" || sameDayRequested ? "Closest eligible technicians" : "Best technicians for this route"}</h2><p>{reassignMode ? `${assignedTech?.name || "The current technician"} is excluded. Ranked by live location and the earliest realistic non-overlapping gap.` : job.priority === "Urgent" ? "Ranked by the closest realistic arrival after checking live location, current-job duration, skills, tools and a non-overlapping gap." : sameDayRequested ? "Ranked by the closest practical same-day gap. Standard quote bookings do not hard-block on stored trade skills or truck tools." : "Ranked using live location, current bookings, skills, tools, travel and daily capacity."}</p></div><span>{scores.filter(score => score.eligible).length} eligible</span></header>
           <div className="decision-requirements">
             <div><small>REQUIRED SKILL</small><b>{job.requiredSkill}</b></div>
             <div><small>REQUIRED TOOL</small><b>{job.requiredTool || "No special tool"}</b></div>
@@ -1195,13 +1226,16 @@ function JobCardDecision({ job, jobs, techs, mapsKey, connected, syncing, sync, 
             const gpsDistance = score.tech.latitude != null && score.tech.longitude != null && job.latitude != null && job.longitude != null
               ? liveDistance(score.tech, job, 0)
               : null;
-            const hasSkill = score.tech.skills.includes(job.requiredSkill);
-            const hasTool = !job.requiredTool || score.tech.tools.includes(job.requiredTool);
+            const capabilityRequired = job.priority === "Urgent";
+            const hasSkill = !capabilityRequired || score.tech.skills.includes(job.requiredSkill);
+            const hasTool = !capabilityRequired || !job.requiredTool || score.tech.tools.includes(job.requiredTool);
+            const skillLabel = capabilityRequired ? job.requiredSkill : `${job.requiredSkill} quote`;
+            const toolLabel = capabilityRequired ? (job.requiredTool || "No special tool") : "Standard quote — tool not required";
             return <label className={`decision-tech ${choice === score.tech.id ? "selected" : ""} ${!score.eligible ? "disabled" : ""}`} key={score.tech.id}>
               <input type="radio" name="technician" disabled={!score.eligible || outside || (Boolean(assignedTech) && !reassignMode)} checked={choice === score.tech.id} onChange={() => setChoice(score.tech.id)} />
               <span className="decision-rank">{index + 1}</span>
               <span className="decision-avatar" style={{ background: score.tech.color }}>{score.tech.name.slice(0, 1)}</span>
-              <div className="decision-tech-main"><div><h3>{score.tech.name}</h3>{index === 0 && score.eligible && <em>RECOMMENDED</em>}</div><p>{score.reason}</p><div className="decision-match-tags"><span className={hasSkill ? "pass" : "fail"}>{hasSkill ? "✓" : "×"} {job.requiredSkill}</span><span className={hasTool ? "pass" : "fail"}>{hasTool ? "✓" : "×"} {job.requiredTool || "No special tool"}</span></div></div>
+              <div className="decision-tech-main"><div><h3>{score.tech.name}</h3>{index === 0 && score.eligible && <em>RECOMMENDED</em>}</div><p>{score.reason}</p><div className="decision-match-tags"><span className={hasSkill ? "pass" : "fail"}>{hasSkill ? "✓" : "×"} {skillLabel}</span><span className={hasTool ? "pass" : "fail"}>{hasTool ? "✓" : "×"} {toolLabel}</span></div></div>
               <div className="decision-tech-status"><strong>{score.eligible ? `${score.eta} min` : "Not eligible"}</strong><small>{gpsDistance == null ? "Route-based estimate" : `${gpsDistance.toFixed(1)} km away`}</small><small>{active?.window ? `On job until ${timeLabel(active.window.end)}` : score.tech.latitude ? "Live location available" : "Location unavailable"}</small><small>{dayJobs.length} jobs booked{sameDayRequested && dayJobs.length >= 6 ? " · same-day overtime allowed" : ""}</small></div>
             </label>;
           })}</div>
