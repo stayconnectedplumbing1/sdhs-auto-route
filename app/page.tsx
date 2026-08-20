@@ -1234,8 +1234,8 @@ function JobCardDecision({ job, jobs, techs, mapsKey, connected, syncing, sync, 
             const hasTool = !capabilityRequired || !job.requiredTool || score.tech.tools.includes(job.requiredTool);
             const skillLabel = capabilityRequired ? job.requiredSkill : `${job.requiredSkill} quote`;
             const toolLabel = capabilityRequired ? (job.requiredTool || "No special tool") : "Standard quote — tool not required";
-            return <label className={`decision-tech ${choice === score.tech.id ? "selected" : ""} ${!score.eligible ? "disabled" : ""}`} key={score.tech.id}>
-              <input type="radio" name="technician" disabled={!score.eligible || outside || (Boolean(assignedTech) && !reassignMode)} checked={choice === score.tech.id} onChange={() => setChoice(score.tech.id)} />
+            return <label className={`decision-tech ${choice === score.tech.id ? "selected" : ""} ${(!sameDayRequested && !score.eligible) ? "disabled" : ""}`} key={score.tech.id}>
+              <input type="radio" name="technician" disabled={outside || (Boolean(assignedTech) && !reassignMode) || (!sameDayRequested && !score.eligible)} checked={choice === score.tech.id} onChange={() => setChoice(score.tech.id)} />
               <span className="decision-rank">{index + 1}</span>
               <span className="decision-avatar" style={{ background: score.tech.color }}>{score.tech.name.slice(0, 1)}</span>
               <div className="decision-tech-main"><div><h3>{score.tech.name}</h3>{index === 0 && score.eligible && <em>RECOMMENDED</em>}</div><p>{score.reason}</p><div className="decision-match-tags"><span className={hasSkill ? "pass" : "fail"}>{hasSkill ? "✓" : "×"} {skillLabel}</span><span className={hasTool ? "pass" : "fail"}>{hasTool ? "✓" : "×"} {toolLabel}</span></div></div>
