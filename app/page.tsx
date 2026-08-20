@@ -63,9 +63,73 @@ const INITIAL_TECHS: Technician[] = [
 ];
 const STORAGE = "sdhs-auto-route-v5";
 const CENTRAL_COAST_SETTING = "sdhs-central-coast-enabled";
+const SETTINGS_API = "/api/settings";
 const DISPATCH_START_HOUR = 6;
 const DISPATCH_END_HOUR = 18;
 const DISPATCH_MINUTES = (DISPATCH_END_HOUR - DISPATCH_START_HOUR) * 60;
+
+type SharedTechnicianOverride = {
+  id: string; name: string; home: string; vehicle: string;
+  skills: string[]; tools: string[]; color: string; x: number; y: number;
+  holding?: boolean;
+};
+type SharedSettings = {
+  version: number;
+  centralCoastEnabled: boolean;
+  tools: string[];
+  technicianOverrides: SharedTechnicianOverride[];
+  updatedAt?: string;
+};
+
+function uniqueList(values: string[]) {
+  return Array.from(new Set(values.map(value => String(value || "").trim()).filter(Boolean)));
+}
+
+function normaliseSharedSettings(settings?: Partial<SharedSettings> | null): SharedSettings {
+  const tools = uniqueList(settings?.tools || DEFAULT_TOOLS);
+  return {
+    version: 1,
+    centralCoastEnabled: settings?.centralCoastEnabled !== false,
+    tools: tools.length ? tools : DEFAULT_TOOLS,
+    technicianOverrides: Array.isArray(settings?.technicianOverrides)
+      ? settings.technicianOverrides.map(tech => ({
+          id: String(tech.id || tech.name || "").trim(),
+          name: String(tech.name || tech.id || "").trim(),
+          home: String(tech.home || "Sydney").trim(),
+          vehicle: String(tech.vehicle || "Service vehicle").trim(),
+          skills: uniqueList(tech.skills || ["General Plumbing"]),
+          tools: uniqueList(tech.tools || []),
+          color: String(tech.color || "#1677ff"),
+          x: Number.isFinite(Number(tech.x)) ? Number(tech.x) : 50,
+          y: Number.isFinite(Number(tech.y)) ? Number(tech.y) : 50,
+          holding: Boolean(tech.holding)
+        })).filter(tech => tech.id && tech.name)
+      : INITIAL_TECHS.map(tech => ({
+          id: tech.id, name: tech.name, home: tech.home, vehicle: tech.vehicle,
+          skills: tech.skills, tools: tech.tools, color: tech.color, x: tech.x, y: tech.y, holding: tech.holding
+        })),
+    updatedAt: settings?.updatedAt
+  };
+}
+
+function mergeSharedSettingsIntoTechs(techs: Technician[], settings: SharedSettings | null) {
+  if (!settings) return techs;
+  return techs.map(tech => {
+    const override = settings.technicianOverrides.find(item => item.id === tech.id || item.name.toLowerCase() === tech.name.toLowerCase());
+    if (!override) return tech;
+    return {
+      ...tech,
+      home: override.home || tech.home,
+      vehicle: override.vehicle || tech.vehicle,
+      skills: override.skills.length ? override.skills : tech.skills,
+      tools: override.tools,
+      color: override.color || tech.color,
+      x: Number.isFinite(override.x) ? override.x : tech.x,
+      y: Number.isFinite(override.y) ? override.y : tech.y,
+      holding: tech.holding || override.holding
+    };
+  });
+}
 
 function distance(a: { x: number; y: number }, b: { x: number; y: number }) {
   return Math.sqrt((a.x - b.x) ** 2 + (a.y - b.y) ** 2);
@@ -234,55 +298,106 @@ function customerRequestedWindow(job: Job) {
 }
 
 function sameDayStandardSlot(tech: Technician, job: Job, jobs: Job[], now = new Date()) {
-  if (jobDateKey(job) !== sydneyDateKey(now)) return null;
   const requested = customerRequestedWindow(job);
-  const dateKey = jobDateKey(job);
+  const dateKey = sydneyDateKey(now);
   const windowStart = new Date(`${dateKey}T${String(requested.startHour).padStart(2, "0")}:00:00`);
   const windowEnd = new Date(`${dateKey}T${String(requested.endHour).padStart(2, "0")}:00:00`);
-  const dayEnd = new Date(`${dateKey}T17:00:00`);
+  // Same-day customer requests are allowed to run past normal planning hours.
+  // We still avoid overlaps, but we do not hide the closest practical tech just
+  // because the day is already packed.
+  const dayEnd = new Date(`${dateKey}T20:00:00`);
   const durationMinutes = Math.max(30, job.duration || 30);
-  const initialTravel = Math.max(10, Math.round(liveDistance(tech, job, distance(routePoint(tech), routePoint(job))) * 1.7));
-  let cursor = roundUpToQuarterHour(new Date(Math.max(windowStart.getTime(), now.getTime() + initialTravel * 60000)));
   const existing = jobs
     .filter(item => item.techId === tech.id && item.id !== job.id && jobDateKey(item) === dateKey)
     .map(item => ({ job: item, window: scheduledWindow(item) }))
     .filter((item): item is { job: Job; window: { start: Date; end: Date } } => Boolean(item.window))
     .sort((a, b) => a.window.start.getTime() - b.window.start.getTime());
+  const jobPoint = routePoint(job);
+  const travelMinutes = (from: RoutePoint, to: RoutePoint) => Math.max(10, Math.round(routeDistance(from, to) * 1.7));
+  const active = currentBooking(tech.id, jobs, now);
+  const startPoint = tech.latitude != null && tech.longitude != null
+    ? routePoint(tech)
+    : active?.job
+      ? routePoint(active.job)
+      : routePoint(tech);
+  const routeInsertions: Array<{
+    plannedOrder: number;
+    addedTravel: number;
+    previousLabel: string;
+    nextLabel: string | null;
+    previousReady: Date;
+    previousPoint: RoutePoint;
+  }> = [];
+  const candidates: Array<{
+    start: Date;
+    end: Date;
+    requested: ReturnType<typeof customerRequestedWindow>;
+    plannedOrder: number;
+    addedTravel: number;
+    previousLabel: string;
+    nextLabel: string | null;
+  }> = [];
 
-  const findSlotBefore = (latestEnd: Date) => {
-    for (const item of existing) {
-      if (item.window.end.getTime() <= cursor.getTime()) continue;
-      const candidateEnd = new Date(cursor.getTime() + durationMinutes * 60000);
-      if (candidateEnd.getTime() <= item.window.start.getTime() - 15 * 60000 && candidateEnd.getTime() <= latestEnd.getTime()) {
-        return { start: cursor, end: candidateEnd, requested };
-      }
-      const onwardTravel = Math.max(10, Math.round(distance(routePoint(item.job), routePoint(job)) * 1.7));
-      cursor = roundUpToQuarterHour(new Date(item.window.end.getTime() + (15 + onwardTravel) * 60000));
-      if (cursor.getTime() >= latestEnd.getTime()) return null;
-    }
-    const end = new Date(cursor.getTime() + durationMinutes * 60000);
-    return end.getTime() <= latestEnd.getTime() ? { start: cursor, end, requested } : null;
-  };
+  for (let index = 0; index <= existing.length; index += 1) {
+    const previous = existing[index - 1] || null;
+    const next = existing[index] || null;
+    const previousPoint = previous ? routePoint(previous.job) : startPoint;
+    const nextPoint = next ? routePoint(next.job) : undefined;
+    const previousReady = previous
+      ? new Date(previous.window.end.getTime() + 15 * 60000)
+      : new Date(Math.max(windowStart.getTime(), now.getTime()));
+    const directTravel = nextPoint ? travelMinutes(previousPoint, nextPoint) : 0;
+    const insertedTravel = travelMinutes(previousPoint, jobPoint) + (nextPoint ? travelMinutes(jobPoint, nextPoint) : 0);
+    routeInsertions.push({
+      plannedOrder: index + 1,
+      addedTravel: Math.max(0, insertedTravel - directTravel),
+      previousLabel: previous ? `job #${previous.job.id}` : "current location",
+      nextLabel: next ? `job #${next.job.id}` : null,
+      previousReady,
+      previousPoint
+    });
+    const earliestStart = roundUpToQuarterHour(new Date(previousReady.getTime() + travelMinutes(previousPoint, jobPoint) * 60000));
+    const end = new Date(earliestStart.getTime() + durationMinutes * 60000);
+    const latestFinish = next
+      ? new Date(next.window.start.getTime() - 15 * 60000 - travelMinutes(jobPoint, routePoint(next.job)) * 60000)
+      : dayEnd;
+    if (end.getTime() > latestFinish.getTime() || end.getTime() > dayEnd.getTime()) continue;
 
-  const preferredSlot = findSlotBefore(windowEnd);
-  if (preferredSlot) return preferredSlot;
-
-  // Customer-requested same-day is a practical dispatch decision. Prefer the
-  // customer’s requested window, but do not hide all options if the first safe
-  // non-overlapping slot is later today.
-  cursor = roundUpToQuarterHour(new Date(Math.max(windowEnd.getTime(), now.getTime() + initialTravel * 60000)));
-  for (const item of existing) {
-    if (item.window.end.getTime() <= cursor.getTime()) continue;
-    const candidateEnd = new Date(cursor.getTime() + durationMinutes * 60000);
-    if (candidateEnd.getTime() <= item.window.start.getTime() - 15 * 60000 && candidateEnd.getTime() <= dayEnd.getTime()) {
-      return { start: cursor, end: candidateEnd, requested };
-    }
-    const onwardTravel = Math.max(10, Math.round(distance(routePoint(item.job), routePoint(job)) * 1.7));
-    cursor = roundUpToQuarterHour(new Date(item.window.end.getTime() + (15 + onwardTravel) * 60000));
-    if (cursor.getTime() >= dayEnd.getTime()) return null;
+    const requestedPenalty = earliestStart.getTime() > windowEnd.getTime() ? 8 : 0;
+    candidates.push({
+      start: earliestStart,
+      end,
+      requested,
+      plannedOrder: index + 1,
+      addedTravel: Math.max(0, insertedTravel - directTravel) + requestedPenalty,
+      previousLabel: previous ? `job #${previous.job.id}` : "current location",
+      nextLabel: next ? `job #${next.job.id}` : null
+    });
   }
-  const end = new Date(cursor.getTime() + durationMinutes * 60000);
-  return end.getTime() <= dayEnd.getTime() ? { start: cursor, end, requested } : null;
+
+  if (candidates.length) {
+    return candidates.sort((a, b) => a.addedTravel - b.addedTravel || a.start.getTime() - b.start.getTime())[0];
+  }
+
+  const bestInsertion = routeInsertions.sort((a, b) => a.addedTravel - b.addedTravel || a.plannedOrder - b.plannedOrder)[0];
+  const last = existing[existing.length - 1] || null;
+  const previousPoint = last ? routePoint(last.job) : startPoint;
+  const previousReady = last
+    ? new Date(last.window.end.getTime() + 15 * 60000)
+    : new Date(Math.max(windowStart.getTime(), now.getTime()));
+  const start = roundUpToQuarterHour(new Date(previousReady.getTime() + travelMinutes(previousPoint, jobPoint) * 60000));
+  const end = new Date(start.getTime() + durationMinutes * 60000);
+  return {
+    start,
+    end,
+    requested,
+    plannedOrder: existing.length + 1,
+    addedTravel: (bestInsertion?.addedTravel ?? travelMinutes(previousPoint, jobPoint)) + 20,
+    previousLabel: bestInsertion
+      ? `${bestInsertion.previousLabel}${bestInsertion.nextLabel ? ` / near ${bestInsertion.nextLabel}` : ""}`
+      : last ? `job #${last.job.id}` : "current location",
+    nextLabel: null
+  };
 }
 
 function isActionRequiredJob(job: Job) {
@@ -427,20 +542,28 @@ function recommendation(tech: Technician, job: Job, jobs: Job[], options: Recomm
   if (isOutsideServiceArea(job)) return { eligible: false, score: 0, eta: 0, reason: "Outside Sydney / Central Coast — manual review required", requiresMove: false, moveJob: null as Job | null };
   if (isCentralCoastJob(job) && !isJoel(tech)) return { eligible: false, score: 0, eta: 0, reason: "Central Coast jobs are assigned to Joel only", requiresMove: false, moveJob: null as Job | null };
   const enforceCapability = job.priority === "Urgent";
-  const missingSkill = enforceCapability && !tech.skills.includes(job.requiredSkill);
-  const missingTool = enforceCapability && !!job.requiredTool && !tech.tools.includes(job.requiredTool);
+  const knownSkills = Array.isArray(tech.skills) && tech.skills.length > 0;
+  const knownTools = Array.isArray(tech.tools) && tech.tools.length > 0;
+  const missingSkill = enforceCapability && knownSkills && !tech.skills.includes(job.requiredSkill);
+  const missingTool = enforceCapability && !!job.requiredTool && knownTools && !tech.tools.includes(job.requiredTool);
   if (missingSkill || missingTool) return { eligible: false, score: 0, eta: 0, reason: missingTool ? `Doesn’t carry ${job.requiredTool}` : `Missing ${job.requiredSkill} skill`, requiresMove: false, moveJob: null as Job | null };
-  const dayJobs = jobs.filter(j => j.techId === tech.id && jobDateKey(j) === jobDateKey(job));
-  const assigned = dayJobs.length;
   const sameDayStandard = job.priority !== "Urgent"
     && (options.sameDayRequested === true || jobDateKey(job) === sydneyDateKey());
+  const routeDateKey = sameDayStandard ? sydneyDateKey() : jobDateKey(job);
+  const dayJobs = jobs.filter(j => j.techId === tech.id && jobDateKey(j) === routeDateKey);
+  const assigned = dayJobs.length;
   const sameDaySlot = sameDayStandard ? sameDayStandardSlot(tech, job, dayJobs) : null;
-  if (sameDayStandard && !sameDaySlot) return { eligible: false, score: 0, eta: 0, reason: "No safe same-day gap before 5:00 PM", requiresMove: false, moveJob: null as Job | null };
   const moveJob = null as Job | null;
   const previous = [...dayJobs].sort((a, b) => b.order - a.order)[0];
-  const from = previous ? SUBURBS[previous.suburb] || tech : HOME[tech.home] || tech;
+  const sameDayFrom = tech.latitude != null && tech.longitude != null
+    ? tech
+    : currentBooking(tech.id, dayJobs)?.job
+      ? SUBURBS[currentBooking(tech.id, dayJobs)!.job.suburb] || tech
+      : HOME[tech.home] || tech;
+  const from = sameDayStandard ? sameDayFrom : previous ? SUBURBS[previous.suburb] || tech : HOME[tech.home] || tech;
   const to = SUBURBS[job.suburb] || { x: 50, y: 50 };
   const travel = liveDistance(tech, job, distance(from, to));
+  const routeInsertCost = sameDaySlot && "addedTravel" in sameDaySlot ? sameDaySlot.addedTravel : routeContinuityCost(tech, job, dayJobs);
   const travelMinutes = Math.max(12, Math.round(10 + travel * 1.7));
   const activeBooking = job.priority === "Urgent" || sameDayStandard ? currentBooking(tech.id, dayJobs) : null;
   const remainingMinutes = activeBooking?.window ? Math.max(0, Math.ceil((activeBooking.window.end.getTime() - Date.now()) / 60000)) : 0;
@@ -453,26 +576,30 @@ function recommendation(tech: Technician, job: Job, jobs: Job[], options: Recomm
   const score = job.priority === "Urgent"
     ? Math.max(35, Math.min(99, Math.round(99 - travel * 1.8 - remainingMinutes * .65)))
     : sameDayStandard
-      ? Math.max(35, Math.min(99, Math.round(99 - travel * 2)))
+      ? Math.max(35, Math.min(99, Math.round(99 - routeInsertCost * 2.4 - remainingMinutes * .04)))
       : Math.max(35, Math.min(98, Math.round(97 - continuity * 1.6 + urgency + consolidation - 12)));
   const urgentReason = activeBooking?.window
     ? `Available after job #${activeBooking.job.id} finishes at ${timeLabel(activeBooking.window.end)}`
     : "Available now — closest realistic arrival";
-  const requestedWindowEnd = sameDaySlot ? new Date(`${jobDateKey(job)}T${String(sameDaySlot.requested.endHour).padStart(2, "0")}:00:00`) : null;
+  const requestedWindowEnd = sameDaySlot ? new Date(`${routeDateKey}T${String(sameDaySlot.requested.endHour).padStart(2, "0")}:00:00`) : null;
   const sameDayGapReason = sameDaySlot
     ? sameDaySlot.start.getTime() <= (requestedWindowEnd?.getTime() || 0)
-      ? `Closest practical same-day route · gap ${timeLabel(sameDaySlot.start)}–${timeLabel(sameDaySlot.end)} · ${assigned} job${assigned === 1 ? "" : "s"} already booked`
-      : `Closest practical same-day route · first safe gap after ${sameDaySlot.requested.label}: ${timeLabel(sameDaySlot.start)}–${timeLabel(sameDaySlot.end)} · ${assigned} job${assigned === 1 ? "" : "s"} already booked`
+      ? `Best route slot after ${sameDaySlot.previousLabel}${sameDaySlot.nextLabel ? ` before ${sameDaySlot.nextLabel}` : ""} · ${timeLabel(sameDaySlot.start)}–${timeLabel(sameDaySlot.end)} · avoids backtracking`
+      : `Best route slot after ${sameDaySlot.previousLabel}${sameDaySlot.nextLabel ? ` before ${sameDaySlot.nextLabel}` : ""} · after ${sameDaySlot.requested.label}: ${timeLabel(sameDaySlot.start)}–${timeLabel(sameDaySlot.end)} · avoids backtracking`
     : "";
   const reason = sameDaySlot
     ? sameDayGapReason
     : assigned === 0
-        ? `Starts from ${tech.home}`
+        ? sameDayStandard
+          ? `Closest practical same-day route · available after travel from ${tech.home}`
+          : `Starts from ${tech.home}`
         : job.priority === "Urgent"
           ? `${urgentReason} · ${assigned} job${assigned === 1 ? "" : "s"} already booked`
+          : sameDayStandard
+            ? `Closest practical same-day route · next available after current run · ${assigned} job${assigned === 1 ? "" : "s"} already booked`
           : `${assigned} booked · adds to the existing run without backtracking`;
   const slotEta = sameDaySlot ? Math.max(0, Math.ceil((sameDaySlot.start.getTime() - Date.now()) / 60000)) : remainingMinutes + travelMinutes;
-  return { eligible: true, score, eta: slotEta, reason, requiresMove: !!moveJob, moveJob, plannedStart: sameDaySlot?.start || null, plannedEnd: sameDaySlot?.end || null };
+  return { eligible: true, score, eta: slotEta, reason, requiresMove: !!moveJob, moveJob, plannedStart: sameDaySlot?.start || null, plannedEnd: sameDaySlot?.end || null, plannedOrder: sameDaySlot?.plannedOrder || null };
 }
 
 export default function Home() {
@@ -508,6 +635,10 @@ export default function Home() {
   const [jobCardMode, setJobCardMode] = useState(false);
   const focusedJobUUID = useRef<string | null>(null);
   const focusedJobOpened = useRef(false);
+  const [settingsPin, setSettingsPin] = useState("");
+  const [settingsUnlocked, setSettingsUnlocked] = useState(false);
+  const [settingsStatus, setSettingsStatus] = useState("Shared settings loading…");
+  const sharedSettingsRef = useRef<SharedSettings | null>(null);
 
   useEffect(() => {
     try {
@@ -516,7 +647,21 @@ export default function Home() {
       focusedJobUUID.current = params.get("jobUUID") || params.get("job_uuid");
       setJobCardMode(Boolean(focusedJobUUID.current));
     } catch {}
-    try { const saved = localStorage.getItem(STORAGE); if (saved) { const d = JSON.parse(saved); setTechs(d.techs || INITIAL_TECHS); setJobs((d.jobs || []).map(normaliseRoutingJob)); setTools(d.tools || DEFAULT_TOOLS); setBoardTechIds(d.boardTechIds || []); const coastEnabled = d.centralCoastEnabled !== false; setCentralCoastEnabled(coastEnabled); localStorage.setItem(CENTRAL_COAST_SETTING, String(coastEnabled)); } } catch {}
+    try {
+      const saved = localStorage.getItem(STORAGE);
+      if (saved) {
+        const d = JSON.parse(saved);
+        const savedTechs = d.techs || INITIAL_TECHS;
+        setTechs(mergeSharedSettingsIntoTechs(savedTechs, sharedSettingsRef.current));
+        setJobs((d.jobs || []).map(normaliseRoutingJob));
+        setTools(d.tools || DEFAULT_TOOLS);
+        setBoardTechIds(d.boardTechIds || []);
+        const coastEnabled = d.centralCoastEnabled !== false;
+        setCentralCoastEnabled(coastEnabled);
+        localStorage.setItem(CENTRAL_COAST_SETTING, String(coastEnabled));
+      }
+    } catch {}
+    void loadSharedSettings();
     setLoaded(true);
   }, []);
   useEffect(() => {
@@ -550,7 +695,7 @@ export default function Home() {
       if (Array.isArray(data.technicians) && data.technicians.length) {
         setTechs(current => {
           const colors = ["#1677ff", "#ef4444", "#7c3aed", "#0f9f6e", "#f59e0b", "#0891b2", "#db2777", "#475569"];
-          return data.technicians.map((person: any, index: number) => {
+          const liveTechs = data.technicians.map((person: any, index: number) => {
             const latitude = Number(person.latitude);
             const longitude = Number(person.longitude);
             const validGps = Number.isFinite(latitude) && Number.isFinite(longitude) && latitude >= -90 && latitude <= 90 && longitude >= -180 && longitude <= 180 && !(latitude === 0 && longitude === 0);
@@ -571,6 +716,7 @@ export default function Home() {
               ,holding: Boolean(person.holding)
             } as Technician;
           });
+          return mergeSharedSettingsIntoTechs(liveTechs, sharedSettingsRef.current);
         });
         setBoardTechIds(current => current.length ? current : data.technicians.filter((person: any) => !person.holding).map((person: any) => person.id));
       }
@@ -588,6 +734,74 @@ export default function Home() {
   const urgentCount = visibleBoardJobs.filter(j => j.priority === "Urgent").length;
   const assignedCount = boardJobs.filter(j => j.techId).length;
   const showToast = (text: string) => { setToast(text); window.setTimeout(() => setToast(""), 2500); };
+  const applySharedSettings = (settings: SharedSettings) => {
+    const normalised = normaliseSharedSettings(settings);
+    const updatedAt = normalised.updatedAt ? new Date(normalised.updatedAt) : null;
+    sharedSettingsRef.current = normalised;
+    setTools(normalised.tools);
+    setCentralCoastEnabled(normalised.centralCoastEnabled);
+    localStorage.setItem(CENTRAL_COAST_SETTING, String(normalised.centralCoastEnabled));
+    setTechs(current => mergeSharedSettingsIntoTechs(current.length ? current : INITIAL_TECHS, normalised));
+    setSettingsStatus(updatedAt && Number.isFinite(updatedAt.getTime()) ? `Shared settings loaded · ${timeLabel(updatedAt)}` : "Shared settings loaded");
+  };
+  const loadSharedSettings = async () => {
+    try {
+      const response = await fetch(SETTINGS_API, { cache: "no-store" });
+      if (!response.ok) throw new Error("Settings unavailable");
+      applySharedSettings(await response.json());
+    } catch {
+      setSettingsStatus("Shared settings unavailable · using this browser until Railway is fixed");
+    }
+  };
+  const buildSharedSettings = (nextTechs = techs, nextTools = tools, nextCentralCoastEnabled = centralCoastEnabled): SharedSettings => normaliseSharedSettings({
+    version: 1,
+    centralCoastEnabled: nextCentralCoastEnabled,
+    tools: nextTools,
+    technicianOverrides: nextTechs.filter(tech => !tech.holding).map(tech => ({
+      id: tech.id,
+      name: tech.name,
+      home: tech.home,
+      vehicle: tech.vehicle,
+      skills: tech.skills,
+      tools: tech.tools,
+      color: tech.color,
+      x: tech.x,
+      y: tech.y,
+      holding: tech.holding
+    }))
+  });
+  const saveSharedSettings = async (nextTechs: Technician[], nextTools: string[], nextCentralCoastEnabled: boolean, message: string) => {
+    if (!settingsUnlocked) {
+      showToast("Unlock Settings with the owner PIN first");
+      return;
+    }
+    const settings = buildSharedSettings(nextTechs, nextTools, nextCentralCoastEnabled);
+    try {
+      const response = await fetch(SETTINGS_API, {
+        method: "PUT",
+        headers: { "content-type": "application/json", "x-admin-pin": settingsPin },
+        body: JSON.stringify(settings)
+      });
+      if (!response.ok) throw new Error(await response.text());
+      applySharedSettings(await response.json());
+      showToast(message);
+    } catch {
+      showToast("Shared settings did not save. Check Railway variables and PIN.");
+      setSettingsStatus("Save failed · shared settings unchanged");
+    }
+  };
+  const unlockSettings = async () => {
+    try {
+      const response = await fetch(SETTINGS_API, { method: "POST", headers: { "x-admin-pin": settingsPin } });
+      if (!response.ok) throw new Error("Wrong PIN");
+      setSettingsUnlocked(true);
+      applySharedSettings(await response.json());
+      showToast("Owner settings unlocked");
+    } catch {
+      setSettingsUnlocked(false);
+      showToast("Wrong admin PIN");
+    }
+  };
   const syncServiceM8 = () => {
     setSyncing(true);
     window.parent?.postMessage({ source: "auto-route-refresh" }, "*");
@@ -703,14 +917,18 @@ export default function Home() {
       || (job.priority !== "Urgent" && jobDateKey(job) === sydneyDateKey());
     const routeCheck = recommendation(tech, job, jobs.filter(j => j.id !== job.id), { ...options, sameDayRequested });
     if (sameDayRequested && !routeCheck.eligible) {
-      showToast(routeCheck.reason || "No realistic same-day gap is available");
+      showToast(routeCheck.reason || "No practical same-day route is available");
       return null;
     }
-    const sameDay = jobs.filter(j => j.techId === techId && jobDateKey(j) === jobDateKey(job) && j.id !== job.id);
-    const order = options.plannedRoute && job.plannedOrder
+    const routeDateKey = sameDayRequested ? sydneyDateKey() : jobDateKey(job);
+    const sameDay = jobs.filter(j => j.techId === techId && jobDateKey(j) === routeDateKey && j.id !== job.id);
+    const sameDayOrder = "plannedOrder" in routeCheck ? routeCheck.plannedOrder : null;
+    const order = sameDayRequested && sameDayOrder
+      ? sameDayOrder
+      : options.plannedRoute && job.plannedOrder
       ? job.plannedOrder
       : job.priority === "Urgent" ? 1 : sameDay.length + 1;
-    const respectAllocation = Boolean(job.holdingWindow);
+    const respectAllocation = Boolean(job.holdingWindow) && !sameDayRequested;
     const allocationStart = job.holdingWindow ? new Date(`${jobDateKey(job)}T${job.holdingWindow === "AM 8-11" ? "08:00:00" : "12:00:00"}`) : null;
     const plannedStart = parseServiceM8Date(job.scheduledStart);
     const plannedEnd = parseServiceM8Date(job.scheduledEnd);
@@ -720,10 +938,10 @@ export default function Home() {
       ? sameDayStart
       : respectAllocation
       ? roundUpToQuarterHour(plannedStart || allocationStart!)
-      : (job.priority === "Urgent" || !job.scheduledStart)
-      ? roundUpToQuarterHour(new Date(Date.now() + (job.priority === "Urgent" ? routeCheck.eta : 5) * 60000))
+      : (job.priority === "Urgent" || sameDayRequested || !job.scheduledStart)
+      ? roundUpToQuarterHour(new Date(Date.now() + ((job.priority === "Urgent" || sameDayRequested) ? routeCheck.eta : 5) * 60000))
       : roundUpToQuarterHour(plannedStart || new Date());
-    const bookingDuration = 30;
+    const bookingDuration = Math.max(30, job.duration || 30);
     let end = sameDayRequested && sameDayEnd
       ? sameDayEnd
       : bookingEnd(start, (respectAllocation || (job.priority !== "Urgent" && job.scheduledEnd)) ? plannedEnd : null, bookingDuration);
@@ -873,7 +1091,11 @@ export default function Home() {
         <button className={page === "Routes" ? "active" : ""} onClick={() => setPage("Routes")}><span>Auto Route</span></button>
         <button className={page === "Runs" ? "active" : ""} onClick={() => setPage("Runs")}><span>Technician Runs</span></button>
         <button className={page === "Jobs" ? "active" : ""} onClick={() => setPage("Jobs")}><span>Today’s Jobs</span><em>{jobs.length}</em></button>
-        <button className={page === "Settings" ? "active" : ""} onClick={() => setPage("Settings")}><span>Settings</span></button>
+        <button className={page === "Settings" ? "active" : ""} onClick={() => {
+          setSettingsUnlocked(false);
+          setSettingsPin("");
+          setPage("Settings");
+        }}><span>Settings</span></button>
       </nav>
       <div className="sidebar-help"><b>{liveConnected ? "Manual dispatch sync" : "Connecting"}</b><p>{liveConnected ? "Press Sync ServiceM8 whenever you want to refresh jobs and technician locations." : "Waiting for live ServiceM8 data."}</p></div>
       <div className="admin-user"><span>AM</span><div><b>Ayman</b><small>Administrator</small></div></div>
@@ -882,7 +1104,7 @@ export default function Home() {
     <main className="content">
       <header className="topbar">
         <div><span className="today">{new Intl.DateTimeFormat("en-AU", { weekday: "long", day: "numeric", month: "long" }).format(new Date()).toUpperCase()}</span><h1>{page === "Routes" ? "Auto Route" : page === "Runs" ? "Technician Runs" : page === "Jobs" ? "Today’s Jobs" : "Technicians & Tools"}</h1><p>{page === "Routes" ? "Plan waiting jobs around real bookings, travel time and technician skills." : page === "Runs" ? "View each technician’s complete daily route separately." : page === "Jobs" ? "Review every job added for today." : "Control exactly what each technician can do and carries in their truck."}</p></div>
-        <div className="top-actions">{page === "Routes" && <><button className="sync-button" onClick={syncServiceM8} disabled={syncing}>{syncing ? "Syncing…" : "↻ Sync ServiceM8"}</button><button className="board-button" onClick={() => setManageBoard(true)}>Manage live board <b>{boardTechs.length}</b></button></>}{page !== "Settings" && page !== "Routes" ? <button className="add-job" onClick={() => setNewJob(true)}>＋ Add New Job</button> : page === "Settings" ? <button className="add-job" onClick={() => setAddTech(true)}>＋ Add Technician</button> : null}</div>
+        <div className="top-actions">{page === "Routes" && <><button className="sync-button" onClick={syncServiceM8} disabled={syncing}>{syncing ? "Syncing…" : "↻ Sync ServiceM8"}</button><button className="board-button" onClick={() => setManageBoard(true)}>Manage live board <b>{boardTechs.length}</b></button></>}{page !== "Settings" && page !== "Routes" ? <button className="add-job" onClick={() => setNewJob(true)}>＋ Add New Job</button> : page === "Settings" && settingsUnlocked ? <button className="add-job" onClick={() => setAddTech(true)}>＋ Add Technician</button> : null}</div>
       </header>
       <section className="connection-banner" aria-label="ServiceM8 connection status">
         <span className="connection-icon">S8</span>
@@ -902,13 +1124,45 @@ export default function Home() {
 
       {page === "Jobs" && <JobsPage jobs={boardJobs} techs={boardTechs} add={() => setNewJob(true)} review={setReview} remove={id => { setJobs(x => x.filter(j => j.id !== id)); showToast(`Job #${id} removed`) }} />}
       {page === "Runs" && <RunsPage techs={boardTechs} jobs={boardJobs} add={() => setNewJob(true)} review={setReview} />}
-      {page === "Settings" && <Settings techs={techs} tools={tools} centralCoastEnabled={centralCoastEnabled} toggleCentralCoast={() => { const enabled = !centralCoastEnabled; localStorage.setItem(CENTRAL_COAST_SETTING, String(enabled)); setCentralCoastEnabled(enabled); showToast(`Central Coast routing switched ${enabled ? "on" : "off"}`); }} edit={setEditTech} addTech={() => setAddTech(true)} addTool={tool => { if (tool && !tools.includes(tool)) { setTools([...tools, tool]); showToast(`${tool} added to tools list`) } }} removeTool={tool => { setTools(tools.filter(x => x !== tool)); setTechs(ts => ts.map(t => ({ ...t, tools: t.tools.filter(x => x !== tool) }))); }} />}
+      {page === "Settings" && <Settings
+        techs={techs}
+        tools={tools}
+        centralCoastEnabled={centralCoastEnabled}
+        settingsUnlocked={settingsUnlocked}
+        settingsPin={settingsPin}
+        settingsStatus={settingsStatus}
+        setSettingsPin={setSettingsPin}
+        unlockSettings={unlockSettings}
+        toggleCentralCoast={() => {
+          const enabled = !centralCoastEnabled;
+          localStorage.setItem(CENTRAL_COAST_SETTING, String(enabled));
+          setCentralCoastEnabled(enabled);
+          void saveSharedSettings(techs, tools, enabled, `Central Coast routing switched ${enabled ? "on" : "off"} for everyone`);
+        }}
+        edit={setEditTech}
+        addTech={() => setAddTech(true)}
+        addTool={tool => {
+          const cleaned = tool.trim();
+          if (cleaned && !tools.includes(cleaned)) {
+            const nextTools = [...tools, cleaned];
+            setTools(nextTools);
+            void saveSharedSettings(techs, nextTools, centralCoastEnabled, `${cleaned} added to shared tools list`);
+          }
+        }}
+        removeTool={tool => {
+          const nextTools = tools.filter(x => x !== tool);
+          const nextTechs = techs.map(t => ({ ...t, tools: t.tools.filter(x => x !== tool) }));
+          setTools(nextTools);
+          setTechs(nextTechs);
+          void saveSharedSettings(nextTechs, nextTools, centralCoastEnabled, `${tool} removed from shared tools list`);
+        }}
+      />}
     </main>
 
     {newJob && <JobForm close={() => setNewJob(false)} create={job => { setJobs(x => [...x, job]); setNewJob(false); setReview(job); }} />}
     {review && <Allocation job={review} jobs={boardJobs} techs={boardTechs} close={() => setReview(null)} assign={assign} />}
-    {editTech && <TechnicianForm tech={editTech} tools={tools} close={() => setEditTech(null)} save={tech => { setTechs(ts => ts.map(t => t.id === tech.id ? tech : t)); setEditTech(null); showToast(`${tech.name}’s truck setup saved`) }} />}
-    {addTech && <TechnicianForm tools={tools} close={() => setAddTech(false)} save={tech => { setTechs(ts => [...ts, tech]); setBoardTechIds(ids => ids.length ? [...ids, tech.id] : ids); setAddTech(false); showToast(`${tech.name} added to the live board`) }} />}
+    {editTech && <TechnicianForm tech={editTech} tools={tools} close={() => setEditTech(null)} save={tech => { const nextTechs = techs.map(t => t.id === tech.id ? tech : t); setTechs(nextTechs); setEditTech(null); void saveSharedSettings(nextTechs, tools, centralCoastEnabled, `${tech.name}’s truck setup saved for everyone`); }} />}
+    {addTech && <TechnicianForm tools={tools} close={() => setAddTech(false)} save={tech => { const nextTechs = [...techs, tech]; setTechs(nextTechs); setBoardTechIds(ids => ids.length ? [...ids, tech.id] : ids); setAddTech(false); void saveSharedSettings(nextTechs, tools, centralCoastEnabled, `${tech.name} added to shared live board settings`); }} />}
     {manageBoard && <div className="modal-overlay"><section className="board-modal"><header><div><h2>Select sales technicians</h2><p>Only the technicians switched on here can receive Auto Route bookings.</p></div><button onClick={() => setManageBoard(false)}>×</button></header><div>{techs.filter(t => !t.holding).map(t => { const on = boardTechIds.length === 0 || boardTechIds.includes(t.id); return <button className={on ? "selected" : ""} key={t.id} onClick={() => setBoardTechIds(ids => on ? (ids.length === 0 ? techs.filter(x => !x.holding).map(x => x.id).filter(id => id !== t.id) : ids.filter(id => id !== t.id)) : [...ids, t.id])}><span style={{background:t.color}}>{t.name[0]}</span><div><b>{t.name}</b><small>{jobs.filter(j => j.techId === t.id).length} quote appointments today</small></div><em>{on ? "✓ On board" : "Add"}</em></button>})}</div><footer><button onClick={() => setBoardTechIds(techs.filter(t => !t.holding).map(t => t.id))}>Show all staff</button><button onClick={() => setManageBoard(false)}>Save selection</button></footer></section></div>}
     {queueWorkspace && <div className="queue-workspace-overlay" role="dialog" aria-modal="true" aria-label="Booking workspace"><section className="queue-workspace"><header><div><span>BOOKING WORKSPACE</span><h2>Dispatch board & jobs waiting to book</h2><p>Drag jobs onto an allocation lane, or drag an allocated job back into Jobs Waiting to Book.</p></div><button onClick={() => setQueueWorkspace(false)} aria-label="Close booking workspace">×</button></header><ServiceM8DispatchBoard techs={boardTechs} jobs={visibleBoardJobs} waitingJobs={boardJobs} review={setReview} selectedDate={selectedDate} routing={autoRouteQueue.length > 0} routeAllocationWindow={routeAllocationWindow} allocateWaitingJob={allocateWaitingJob} returnWaitingJob={returnWaitingJob} focus /></section></div>}
     <div className="desktop-only">This dashboard is designed for an admin desktop screen. Please open it on a larger display.</div>
@@ -1127,11 +1381,69 @@ function RunsPage({ techs, jobs, add, review }: { techs: Technician[]; jobs: Job
   </section>
 }
 
-function Settings({ techs, tools, centralCoastEnabled, toggleCentralCoast, edit, addTech, addTool, removeTool }: { techs: Technician[]; tools: string[]; centralCoastEnabled: boolean; toggleCentralCoast: () => void; edit: (t: Technician) => void; addTech: () => void; addTool: (s: string) => void; removeTool: (s: string) => void }) {
+function Settings({ techs, tools, centralCoastEnabled, settingsUnlocked, settingsPin, settingsStatus, setSettingsPin, unlockSettings, toggleCentralCoast, edit, addTech, addTool, removeTool }: {
+  techs: Technician[];
+  tools: string[];
+  centralCoastEnabled: boolean;
+  settingsUnlocked: boolean;
+  settingsPin: string;
+  settingsStatus: string;
+  setSettingsPin: (value: string) => void;
+  unlockSettings: () => void;
+  toggleCentralCoast: () => void;
+  edit: (t: Technician) => void;
+  addTech: () => void;
+  addTool: (s: string) => void;
+  removeTool: (s: string) => void;
+}) {
   const [tool, setTool] = useState("");
-  return <div className="settings-grid"><section className="settings-main"><div className={`service-area-setting ${centralCoastEnabled ? "enabled" : "disabled"}`}><div><small>SERVICE AREA CONTROL</small><h2>Central Coast routing</h2><p>{centralCoastEnabled ? "ON — Central Coast jobs can auto-route to Joel only." : "OFF — Central Coast jobs stay visible but are treated as outside the active service area."}</p></div><button className="area-toggle" role="switch" aria-checked={centralCoastEnabled} onClick={toggleCentralCoast}><span />{centralCoastEnabled ? "ON" : "OFF"}</button></div><div className="settings-title"><div><h2>Technicians and Truck Setup</h2><p>The auto router only considers technicians who have the required skill and tool.</p></div><button onClick={addTech}>＋ Add Technician</button></div>{techs.map(t => <article className="technician-setting" key={t.id}><span className="setting-avatar" style={{ background: t.color }}>{t.name.slice(0, 2).toUpperCase()}</span><div className="setting-info"><h3>{t.name}</h3><p>{t.home} · {t.vehicle} · {t.status}</p><small>SKILLS</small><div className="tag-list">{t.skills.map(s => <i key={s}>{s}</i>)}</div><small>TOOLS IN TRUCK</small><div className="tag-list tools">{t.tools.length ? t.tools.map(s => <i key={s}>✓ {s}</i>) : <em>No tools assigned</em>}</div></div><button className="edit-button" onClick={() => edit(t)}>Edit Technician & Truck</button></article>)}</section>
-    <aside className="tools-library"><h2>Master Tools List</h2><p>Add every tool or piece of equipment your technicians may carry. You can then assign them individually.</p><form onSubmit={e => { e.preventDefault(); addTool(tool.trim()); setTool("") }}><input value={tool} onChange={e => setTool(e.target.value)} placeholder="e.g. Pipe freeze kit" /><button>＋ Add</button></form><div className="tool-list">{tools.map(t => <div key={t}><span>🧰</span><b>{t}</b><em>{techs.filter(x => x.tools.includes(t)).length} trucks</em><button onClick={() => removeTool(t)}>×</button></div>)}</div><div className="settings-note"><b>Important</b><p>If a job requires a tool and no technician has it selected, the job will remain unassigned and warn the admin.</p></div></aside>
-  </div>
+  if (!settingsUnlocked) {
+    return <div className="settings-grid">
+      <section className="settings-lock">
+        <small>OWNER SETTINGS</small>
+        <h2>Admin PIN required</h2>
+        <p>These settings control every ServiceM8 user who opens Auto Route: technician skills, truck equipment, live-board rules and Central Coast routing.</p>
+        <form onSubmit={event => { event.preventDefault(); void unlockSettings(); }}>
+          <input type="password" value={settingsPin} onChange={event => setSettingsPin(event.target.value)} placeholder="Enter admin PIN" autoComplete="off" />
+          <button type="submit">Unlock Settings</button>
+        </form>
+        <div className="settings-status">{settingsStatus}</div>
+      </section>
+      <aside className="settings-note-panel">
+        <h2>What this controls</h2>
+        <ul>
+          <li>Skills and truck tools used for urgent job eligibility.</li>
+          <li>Standard same-day jobs still rank by the closest practical route.</li>
+          <li>Central Coast can be switched on or off for every admin.</li>
+        </ul>
+      </aside>
+    </div>;
+  }
+
+  return <div className="settings-grid">
+    <section className="settings-main">
+      <div className="settings-admin-banner">
+        <div><small>SHARED SETTINGS UNLOCKED</small><b>Changes save to Railway and load for every admin using ServiceM8.</b></div>
+        <span>{settingsStatus}</span>
+      </div>
+      <div className={`service-area-setting ${centralCoastEnabled ? "enabled" : "disabled"}`}>
+        <div><small>SERVICE AREA CONTROL</small><h2>Central Coast routing is {centralCoastEnabled ? "ON" : "OFF"}</h2><p>{centralCoastEnabled ? "Central Coast jobs can auto-route under the Joel-only rule." : "Central Coast jobs stay visible but are treated as outside the active service area."}</p></div>
+        <button className="area-toggle" role="switch" aria-checked={centralCoastEnabled} onClick={toggleCentralCoast}><span />{centralCoastEnabled ? "ON" : "OFF"}</button>
+      </div>
+      <div className="settings-title"><div><h2>Technician Skills & Truck Equipment</h2><p>This is the shared truth used by the ServiceM8 job card and full dispatch board.</p></div><button onClick={addTech}>＋ Add Technician</button></div>
+      {techs.filter(t => !t.holding).map(t => <article className="technician-setting" key={t.id}><span className="setting-avatar" style={{ background: t.color }}>{t.name.slice(0, 2).toUpperCase()}</span><div className="setting-info"><h3>{t.name}</h3><p>{t.home} · {t.vehicle} · {t.status}</p><small>SKILLS</small><div className="tag-list">{t.skills.length ? t.skills.map(s => <i key={s}>{s}</i>) : <em>No skills configured</em>}</div><small>TOOLS IN TRUCK</small><div className="tag-list tools">{t.tools.length ? t.tools.map(s => <i key={s}>✓ {s}</i>) : <em>No special tools assigned</em>}</div></div><button className="edit-button" onClick={() => edit(t)}>Edit Technician & Truck</button></article>)}
+    </section>
+    <aside className="tools-library">
+      <h2>Master Tools List</h2>
+      <p>Add every tool or piece of equipment your technicians may carry. Assign tools individually to each truck.</p>
+      <form onSubmit={event => { event.preventDefault(); addTool(tool.trim()); setTool(""); }}>
+        <input value={tool} onChange={event => setTool(event.target.value)} placeholder="e.g. Pipe freeze kit" />
+        <button>＋ Add</button>
+      </form>
+      <div className="tool-list">{tools.map(t => <div key={t}><span>🧰</span><b>{t}</b><em>{techs.filter(x => x.tools.includes(t)).length} trucks</em><button onClick={() => removeTool(t)}>×</button></div>)}</div>
+      <div className="settings-note"><b>Important</b><p>If an urgent job requires a tool and no technician has it selected, the job will remain unassigned and warn the admin. Standard quote jobs do not require special tools.</p></div>
+    </aside>
+  </div>;
 }
 
 function JobForm({ close, create }: { close: () => void; create: (j: Job) => void }) {
@@ -1161,14 +1473,14 @@ function JobCardDecision({ job, jobs, techs, mapsKey, connected, syncing, sync, 
         .map(tech => ({ tech, ...recommendation(tech, job, jobs.filter(item => item.id !== job.id), { sameDayRequested: sameDayRequested || reassignMode }) }))
         .sort((a, b) => Number(b.eligible) - Number(a.eligible) || b.score - a.score)
     : [], [techs, job, jobs, sameDayRequested, reassignMode]);
-  const best = scores.find(score => score.eligible);
+  const best = sameDayRequested ? scores[0] : scores.find(score => score.eligible);
   const [choice, setChoice] = useState("");
 
   useEffect(() => {
-    if (!choice || !scores.some(score => score.tech.id === choice && score.eligible)) {
+    if (!choice || !scores.some(score => score.tech.id === choice && (score.eligible || sameDayRequested))) {
       setChoice(best?.tech.id || "");
     }
-  }, [best?.tech.id, choice, scores]);
+  }, [best?.tech.id, choice, scores, sameDayRequested]);
 
   useEffect(() => {
     setSameDayRequested(false);
@@ -1209,34 +1521,37 @@ function JobCardDecision({ job, jobs, techs, mapsKey, connected, syncing, sync, 
       {outside && <section className="decision-warning"><b>OUTSIDE SYDNEY / CENTRAL COAST</b><p>This job requires manual review and will not be auto-assigned.</p></section>}
       {centralCoast && <section className="decision-coast-rule"><b>CENTRAL COAST — JOEL ONLY</b><p>{joelScore?.eligible ? "Joel is the only technician who can be selected for this job." : "Joel is unavailable or does not meet the job requirements. Manual review is required."}</p></section>}
       {assignedTech && <section className={`decision-booked ${reassignMode ? "reassigning" : ""}`}><span>{reassignMode ? "↔" : "✓"}</span><div><b>{reassignMode ? `Find the closest replacement for ${assignedTech.name}` : `Already booked to ${assignedTech.name}`}</b><p>{reassignMode ? "The delayed technician is excluded. Select the closest available sales technician with a realistic gap." : "If this technician is delayed, Auto Route can safely move the existing ServiceM8 booking to someone closer."}</p></div><button disabled={!job.activityUUID} onClick={() => setReassignMode(value => !value)}>{!job.activityUUID ? "Sync required before moving" : reassignMode ? "Cancel reassignment" : "Technician delayed — find replacement"}</button></section>}
-      {job.priority !== "Urgent" && !assignedTech && <section className={`same-day-request ${sameDayRequested ? "active" : ""}`}><div><small>STANDARD JOB — OPTIONAL SAME-DAY REQUEST</small><b>Did the customer ask to be booked today?</b><p>Recommend the closest eligible technician with a real gap. Job count will not outweigh distance, even above six jobs. Existing bookings will not be moved or overlapped.</p></div><button onClick={() => setSameDayRequested(value => !value)}>{sameDayRequested ? "✓ Customer requested today" : "Customer requested today"}</button></section>}
+      {job.priority !== "Urgent" && !assignedTech && <section className={`same-day-request ${sameDayRequested ? "active" : ""}`}><div><small>STANDARD JOB — OPTIONAL SAME-DAY REQUEST</small><b>Did the customer ask to be booked today?</b><p>Recommend the closest practical technician today. Job count will not outweigh distance, even above six jobs. If the normal run is full, the system can still offer an after-run same-day booking.</p></div><button onClick={() => setSameDayRequested(value => !value)}>{sameDayRequested ? "✓ Customer requested today" : "Customer requested today"}</button></section>}
 
       <div className="decision-grid">
         <section className="decision-ranking">
-          <header><div><small>RECOMMENDATION</small><h2>{reassignMode ? "Closest replacement technicians" : job.priority === "Urgent" || sameDayRequested ? "Closest eligible technicians" : "Best technicians for this route"}</h2><p>{reassignMode ? `${assignedTech?.name || "The current technician"} is excluded. Ranked by live location and the earliest realistic non-overlapping gap.` : job.priority === "Urgent" ? "Ranked by the closest realistic arrival after checking live location, current-job duration, skills, tools and a non-overlapping gap." : sameDayRequested ? "Ranked by the closest practical same-day gap. Standard quote bookings do not hard-block on stored trade skills or truck tools." : "Ranked using live location, current bookings, skills, tools, travel and daily capacity."}</p></div><span>{scores.filter(score => score.eligible).length} eligible</span></header>
+          <header><div><small>RECOMMENDATION</small><h2>{reassignMode ? "Closest replacement technicians" : job.priority === "Urgent" || sameDayRequested ? "Closest practical technicians" : "Best technicians for this route"}</h2><p>{reassignMode ? `${assignedTech?.name || "The current technician"} is excluded. Ranked by live location and the earliest realistic non-overlapping gap.` : job.priority === "Urgent" ? "Ranked by the closest realistic arrival after checking live location, current-job duration, skills, tools and a non-overlapping gap." : sameDayRequested ? "Ranked by closest practical same-day route. If no normal gap exists, the top technician can still be selected for after-run same-day booking." : "Ranked using live location, current bookings, skills, tools, travel and daily capacity."}</p></div><span>{sameDayRequested ? scores.length : scores.filter(score => score.eligible).length} eligible</span></header>
           <div className="decision-requirements">
             <div><small>REQUIRED SKILL</small><b>{job.requiredSkill}</b></div>
             <div><small>REQUIRED TOOL</small><b>{job.requiredTool || "No special tool"}</b></div>
             <div><small>JOB DURATION</small><b>{job.duration} minutes</b></div>
-            <div><small>BOOKING RULE</small><b>{job.priority === "Urgent" ? "Same day — next realistic slot" : sameDayRequested ? `Customer requested today · ${customerRequestedWindow(job).label}` : job.holdingWindow || job.bookingDay}</b></div>
+            <div><small>BOOKING RULE</small><b>{job.priority === "Urgent" ? "Same day — next realistic slot" : sameDayRequested ? "Customer requested today · closest practical tech today" : job.holdingWindow || job.bookingDay}</b></div>
           </div>
           <div className="decision-tech-list">{scores.map((score, index) => {
-            const dayJobs = jobs.filter(item => item.techId === score.tech.id && item.id !== job.id && jobDateKey(item) === jobDateKey(job));
+            const routeDateKey = sameDayRequested ? sydneyDateKey() : jobDateKey(job);
+            const dayJobs = jobs.filter(item => item.techId === score.tech.id && item.id !== job.id && jobDateKey(item) === routeDateKey);
             const active = currentBooking(score.tech.id, dayJobs);
             const gpsDistance = score.tech.latitude != null && score.tech.longitude != null && job.latitude != null && job.longitude != null
               ? liveDistance(score.tech, job, 0)
               : null;
             const capabilityRequired = job.priority === "Urgent";
-            const hasSkill = !capabilityRequired || score.tech.skills.includes(job.requiredSkill);
-            const hasTool = !capabilityRequired || !job.requiredTool || score.tech.tools.includes(job.requiredTool);
-            const skillLabel = capabilityRequired ? job.requiredSkill : `${job.requiredSkill} quote`;
-            const toolLabel = capabilityRequired ? (job.requiredTool || "No special tool") : "Standard quote — tool not required";
-            return <label className={`decision-tech ${choice === score.tech.id ? "selected" : ""} ${!score.eligible ? "disabled" : ""}`} key={score.tech.id}>
-              <input type="radio" name="technician" disabled={!score.eligible || outside || (Boolean(assignedTech) && !reassignMode)} checked={choice === score.tech.id} onChange={() => setChoice(score.tech.id)} />
+            const knownSkills = Array.isArray(score.tech.skills) && score.tech.skills.length > 0;
+            const knownTools = Array.isArray(score.tech.tools) && score.tech.tools.length > 0;
+            const hasSkill = !capabilityRequired || !knownSkills || score.tech.skills.includes(job.requiredSkill);
+            const hasTool = !capabilityRequired || !job.requiredTool || !knownTools || score.tech.tools.includes(job.requiredTool);
+            const skillLabel = capabilityRequired ? (knownSkills ? job.requiredSkill : `${job.requiredSkill} not configured`) : `${job.requiredSkill} quote`;
+            const toolLabel = capabilityRequired ? (job.requiredTool ? (knownTools ? job.requiredTool : `${job.requiredTool} not configured`) : "No special tool") : "Standard quote — tool not required";
+            return <label className={`decision-tech ${choice === score.tech.id ? "selected" : ""} ${(!sameDayRequested && !score.eligible) ? "disabled" : ""}`} key={score.tech.id}>
+              <input type="radio" name="technician" disabled={outside || (Boolean(assignedTech) && !reassignMode) || (!sameDayRequested && !score.eligible)} checked={choice === score.tech.id} onChange={() => setChoice(score.tech.id)} />
               <span className="decision-rank">{index + 1}</span>
               <span className="decision-avatar" style={{ background: score.tech.color }}>{score.tech.name.slice(0, 1)}</span>
-              <div className="decision-tech-main"><div><h3>{score.tech.name}</h3>{index === 0 && score.eligible && <em>RECOMMENDED</em>}</div><p>{score.reason}</p><div className="decision-match-tags"><span className={hasSkill ? "pass" : "fail"}>{hasSkill ? "✓" : "×"} {skillLabel}</span><span className={hasTool ? "pass" : "fail"}>{hasTool ? "✓" : "×"} {toolLabel}</span></div></div>
-              <div className="decision-tech-status"><strong>{score.eligible ? `${score.eta} min` : "Not eligible"}</strong><small>{gpsDistance == null ? "Route-based estimate" : `${gpsDistance.toFixed(1)} km away`}</small><small>{active?.window ? `On job until ${timeLabel(active.window.end)}` : score.tech.latitude ? "Live location available" : "Location unavailable"}</small><small>{dayJobs.length} jobs booked{sameDayRequested && dayJobs.length >= 6 ? " · same-day overtime allowed" : ""}</small></div>
+              <div className="decision-tech-main"><div><h3>{score.tech.name}</h3>{index === 0 && (score.eligible || sameDayRequested) && <em>RECOMMENDED</em>}</div><p>{score.reason}</p><div className="decision-match-tags"><span className={hasSkill ? "pass" : "fail"}>{hasSkill ? "✓" : "×"} {skillLabel}</span><span className={hasTool ? "pass" : "fail"}>{hasTool ? "✓" : "×"} {toolLabel}</span></div></div>
+              <div className="decision-tech-status"><strong>{score.eligible || sameDayRequested ? `${score.eta} min` : "Not eligible"}</strong><small>{gpsDistance == null ? "Route-based estimate" : `${gpsDistance.toFixed(1)} km away`}</small><small>{active?.window ? `On job until ${timeLabel(active.window.end)}` : score.tech.latitude ? "Live location available" : "Location unavailable"}</small><small>{dayJobs.length} jobs booked{sameDayRequested && dayJobs.length >= 6 ? " · same-day overtime allowed" : ""}</small></div>
             </label>;
           })}</div>
         </section>
@@ -1245,7 +1560,7 @@ function JobCardDecision({ job, jobs, techs, mapsKey, connected, syncing, sync, 
       </div>
     </main>
 
-    <footer className="decision-footer"><div>{chosen ? <><small>{reassignMode ? "RECOMMENDED REPLACEMENT" : sameDayRequested ? "CLOSEST SAME-DAY TECHNICIAN" : "SELECTED TECHNICIAN"}</small><b>{chosen.tech.name}</b><span>{chosen.reason}{reassignMode || sameDayRequested ? " · closest eligible route selected" : ` · estimated ${chosen.eta} minute travel`}</span></> : <><small>NO TECHNICIAN SELECTED</small><b>{reassignMode || sameDayRequested ? "No realistic same-day gap is available" : "Review the requirements above"}</b></>}</div><button className="decision-secondary" onClick={openDashboard}>View full dispatch board</button><button className="decision-assign" disabled={!choice || outside || (Boolean(assignedTech) && !reassignMode)} onClick={() => assign(job, choice, { sameDayRequested: sameDayRequested || reassignMode })}>{reassignMode && assignedTech ? `Move from ${assignedTech.name} to ${techs.find(tech => tech.id === choice)?.name || "replacement"} in ServiceM8` : assignedTech ? `Booked to ${assignedTech.name}` : choice ? `${sameDayRequested ? "Book same-day with" : "Book with"} ${techs.find(tech => tech.id === choice)?.name || "technician"} in ServiceM8` : "No eligible technician"}</button></footer>
+    <footer className="decision-footer"><div>{chosen ? <><small>{reassignMode ? "RECOMMENDED REPLACEMENT" : sameDayRequested ? "CLOSEST SAME-DAY TECHNICIAN" : "SELECTED TECHNICIAN"}</small><b>{chosen.tech.name}</b><span>{chosen.reason}{reassignMode || sameDayRequested ? " · closest practical route selected" : ` · estimated ${chosen.eta} minute travel`}</span></> : <><small>NO TECHNICIAN SELECTED</small><b>{reassignMode || sameDayRequested ? "No practical same-day route is available" : "Review the requirements above"}</b></>}</div><button className="decision-secondary" onClick={openDashboard}>View full dispatch board</button><button className="decision-assign" disabled={!choice || outside || (Boolean(assignedTech) && !reassignMode)} onClick={() => assign(job, choice, { sameDayRequested: sameDayRequested || reassignMode })}>{reassignMode && assignedTech ? `Move from ${assignedTech.name} to ${techs.find(tech => tech.id === choice)?.name || "replacement"} in ServiceM8` : assignedTech ? `Booked to ${assignedTech.name}` : choice ? `${sameDayRequested ? "Book same-day with" : "Book with"} ${techs.find(tech => tech.id === choice)?.name || "technician"} in ServiceM8` : "No eligible technician"}</button></footer>
   </div>;
 }
 
