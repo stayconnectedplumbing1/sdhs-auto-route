@@ -435,6 +435,7 @@ function recommendation(tech: Technician, job: Job, jobs: Job[], options: Recomm
   const sameDayStandard = job.priority !== "Urgent"
     && (options.sameDayRequested === true || jobDateKey(job) === sydneyDateKey());
   const sameDaySlot = sameDayStandard ? sameDayStandardSlot(tech, job, dayJobs) : null;
+  if (sameDayStandard && !sameDaySlot) return { eligible: false, score: 0, eta: 0, reason: "No safe same-day gap before 5:00 PM", requiresMove: false, moveJob: null as Job | null };
   const moveJob = null as Job | null;
   const previous = [...dayJobs].sort((a, b) => b.order - a.order)[0];
   const from = previous ? SUBURBS[previous.suburb] || tech : HOME[tech.home] || tech;
@@ -466,13 +467,9 @@ function recommendation(tech: Technician, job: Job, jobs: Job[], options: Recomm
   const reason = sameDaySlot
     ? sameDayGapReason
     : assigned === 0
-        ? sameDayStandard
-          ? `Closest practical same-day route · available after travel from ${tech.home}`
-          : `Starts from ${tech.home}`
+        ? `Starts from ${tech.home}`
         : job.priority === "Urgent"
           ? `${urgentReason} · ${assigned} job${assigned === 1 ? "" : "s"} already booked`
-          : sameDayStandard
-            ? `Closest practical same-day route · next available after current run · ${assigned} job${assigned === 1 ? "" : "s"} already booked`
           : `${assigned} booked · adds to the existing run without backtracking`;
   const slotEta = sameDaySlot ? Math.max(0, Math.ceil((sameDaySlot.start.getTime() - Date.now()) / 60000)) : remainingMinutes + travelMinutes;
   return { eligible: true, score, eta: slotEta, reason, requiresMove: !!moveJob, moveJob, plannedStart: sameDaySlot?.start || null, plannedEnd: sameDaySlot?.end || null };
@@ -713,7 +710,7 @@ export default function Home() {
     const order = options.plannedRoute && job.plannedOrder
       ? job.plannedOrder
       : job.priority === "Urgent" ? 1 : sameDay.length + 1;
-    const respectAllocation = Boolean(job.holdingWindow) && !sameDayRequested;
+    const respectAllocation = Boolean(job.holdingWindow);
     const allocationStart = job.holdingWindow ? new Date(`${jobDateKey(job)}T${job.holdingWindow === "AM 8-11" ? "08:00:00" : "12:00:00"}`) : null;
     const plannedStart = parseServiceM8Date(job.scheduledStart);
     const plannedEnd = parseServiceM8Date(job.scheduledEnd);
@@ -726,7 +723,7 @@ export default function Home() {
       : (job.priority === "Urgent" || !job.scheduledStart)
       ? roundUpToQuarterHour(new Date(Date.now() + (job.priority === "Urgent" ? routeCheck.eta : 5) * 60000))
       : roundUpToQuarterHour(plannedStart || new Date());
-    const bookingDuration = Math.max(30, job.duration || 30);
+    const bookingDuration = 30;
     let end = sameDayRequested && sameDayEnd
       ? sameDayEnd
       : bookingEnd(start, (respectAllocation || (job.priority !== "Urgent" && job.scheduledEnd)) ? plannedEnd : null, bookingDuration);
@@ -1221,7 +1218,7 @@ function JobCardDecision({ job, jobs, techs, mapsKey, connected, syncing, sync, 
             <div><small>REQUIRED SKILL</small><b>{job.requiredSkill}</b></div>
             <div><small>REQUIRED TOOL</small><b>{job.requiredTool || "No special tool"}</b></div>
             <div><small>JOB DURATION</small><b>{job.duration} minutes</b></div>
-            <div><small>BOOKING RULE</small><b>{job.priority === "Urgent" ? "Same day — next realistic slot" : sameDayRequested ? "Customer requested today · closest practical tech today" : job.holdingWindow || job.bookingDay}</b></div>
+            <div><small>BOOKING RULE</small><b>{job.priority === "Urgent" ? "Same day — next realistic slot" : sameDayRequested ? `Customer requested today · ${customerRequestedWindow(job).label}` : job.holdingWindow || job.bookingDay}</b></div>
           </div>
           <div className="decision-tech-list">{scores.map((score, index) => {
             const dayJobs = jobs.filter(item => item.techId === score.tech.id && item.id !== job.id && jobDateKey(item) === jobDateKey(job));
@@ -1234,8 +1231,8 @@ function JobCardDecision({ job, jobs, techs, mapsKey, connected, syncing, sync, 
             const hasTool = !capabilityRequired || !job.requiredTool || score.tech.tools.includes(job.requiredTool);
             const skillLabel = capabilityRequired ? job.requiredSkill : `${job.requiredSkill} quote`;
             const toolLabel = capabilityRequired ? (job.requiredTool || "No special tool") : "Standard quote — tool not required";
-            return <label className={`decision-tech ${choice === score.tech.id ? "selected" : ""} ${(!sameDayRequested && !score.eligible) ? "disabled" : ""}`} key={score.tech.id}>
-              <input type="radio" name="technician" disabled={outside || (Boolean(assignedTech) && !reassignMode) || (!sameDayRequested && !score.eligible)} checked={choice === score.tech.id} onChange={() => setChoice(score.tech.id)} />
+            return <label className={`decision-tech ${choice === score.tech.id ? "selected" : ""} ${!score.eligible ? "disabled" : ""}`} key={score.tech.id}>
+              <input type="radio" name="technician" disabled={!score.eligible || outside || (Boolean(assignedTech) && !reassignMode)} checked={choice === score.tech.id} onChange={() => setChoice(score.tech.id)} />
               <span className="decision-rank">{index + 1}</span>
               <span className="decision-avatar" style={{ background: score.tech.color }}>{score.tech.name.slice(0, 1)}</span>
               <div className="decision-tech-main"><div><h3>{score.tech.name}</h3>{index === 0 && score.eligible && <em>RECOMMENDED</em>}</div><p>{score.reason}</p><div className="decision-match-tags"><span className={hasSkill ? "pass" : "fail"}>{hasSkill ? "✓" : "×"} {skillLabel}</span><span className={hasTool ? "pass" : "fail"}>{hasTool ? "✓" : "×"} {toolLabel}</span></div></div>
