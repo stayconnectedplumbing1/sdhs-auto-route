@@ -21,6 +21,7 @@ type SharedTechnicianOverride = {
 type SharedSettings = {
   version: number;
   centralCoastEnabled: boolean;
+  centralCoastRoutingEnabled?: boolean;
   tools: string[];
   technicianOverrides: SharedTechnicianOverride[];
   updatedAt?: string;
@@ -47,10 +48,10 @@ const DEFAULT_SETTINGS: SharedSettings = {
 };
 
 const SETTINGS_FILE = process.env.AUTO_ROUTE_SETTINGS_FILE || "/tmp/auto-route-settings.json";
-const SETTINGS_PIN = process.env.ADMIN_SETTINGS_PIN || "2468";
+const SETTINGS_PIN = String(process.env.ADMIN_SETTINGS_PIN || "2468").trim();
 
 function authorised(request: NextRequest) {
-  return request.headers.get("x-admin-pin") === SETTINGS_PIN;
+  return String(request.headers.get("x-admin-pin") || "").trim() === SETTINGS_PIN;
 }
 
 function cleanList(values: unknown): string[] {
@@ -60,9 +61,12 @@ function cleanList(values: unknown): string[] {
 
 function normalise(settings: Partial<SharedSettings>): SharedSettings {
   const tools = cleanList(settings.tools);
+  const centralCoastValue = typeof settings.centralCoastRoutingEnabled === "boolean"
+    ? settings.centralCoastRoutingEnabled
+    : settings.centralCoastEnabled;
   return {
     version: 1,
-    centralCoastEnabled: settings.centralCoastEnabled !== false,
+    centralCoastEnabled: centralCoastValue !== false,
     tools: tools.length ? tools : DEFAULT_TOOLS,
     technicianOverrides: Array.isArray(settings.technicianOverrides)
       ? settings.technicianOverrides.map(tech => ({
@@ -110,4 +114,3 @@ export async function POST(request: NextRequest) {
 export async function PUT(request: NextRequest) {
   if (!authorised(request)) return NextResponse.json({ error: "Wrong PIN" }, { status: 401 });
   return NextResponse.json(await writeSettings(await request.json()));
-}
