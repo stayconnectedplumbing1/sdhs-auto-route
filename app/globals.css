@@ -24,3 +24,74 @@ html,body{font-size:16px}.sidebar{width:260px;padding:28px 18px 20px}.content{ma
 
 /* Shared admin settings */
 .settings-lock,.settings-note-panel{background:#fff;border:1px solid var(--line);border-radius:12px;padding:24px;box-shadow:0 4px 14px #17233010}.settings-lock small{font-size:11px;letter-spacing:.8px;color:#667085;font-weight:900}.settings-lock h2{font-size:26px;margin:8px 0}.settings-lock p,.settings-note-panel li{font-size:13px;color:#53606d;line-height:1.55}.settings-lock form{display:flex;gap:10px;margin-top:18px}.settings-lock input{height:44px;flex:1;border:1px solid #cfd7df;border-radius:8px;padding:0 13px;font-size:14px}.settings-lock button{height:44px;border:0;border-radius:8px;background:#1677ff;color:#fff;font-weight:850;padding:0 18px}.settings-status{margin-top:14px;padding:11px 12px;border-radius:8px;background:#f3f6f9;color:#53606d;font-size:12px;font-weight:750}.settings-note-panel h2{margin:0 0 10px;font-size:20px}.settings-note-panel ul{margin:0;padding-left:19px}.settings-admin-banner{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:14px;padding:13px 15px;border:1px solid #bfdbfe;border-left:5px solid #1677ff;border-radius:9px;background:#eff6ff}.settings-admin-banner small,.settings-admin-banner b,.settings-admin-banner span{display:block}.settings-admin-banner small{font-size:9px;letter-spacing:.7px;color:#1556a0;font-weight:900}.settings-admin-banner b{font-size:12px;color:#24313e;margin-top:3px}.settings-admin-banner span{font-size:11px;color:#1556a0;font-weight:800;text-align:right}
+
+/* ==========================================================================
+   Visual redesign pass — colors/spacing/cards/shadows/buttons only.
+   Nothing below changes a class name, DOM structure, or any selector used
+   by the dispatch/routing logic above; this block only overrides how the
+   existing elements look. Safe to delete this block to fully revert.
+   ========================================================================== */
+:root{
+  --radius-sm:10px; --radius:16px; --radius-lg:22px;
+  --shadow-card:0 1px 2px rgba(15,23,32,.05), 0 8px 22px -8px rgba(15,23,32,.12);
+  --shadow-raised:0 10px 22px -8px rgba(15,23,32,.22), 0 24px 48px -18px rgba(15,23,32,.2);
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, Helvetica, Arial, sans-serif;
+}
+html,body{font-family:var(--font-sans);-webkit-font-smoothing:antialiased}
+
+/* Sidebar — deep navy kept, softened with a subtle gradient + glow instead of flat fill */
+.sidebar{background:linear-gradient(180deg,#182230,var(--nav));box-shadow:2px 0 24px rgba(9,17,28,.18)}
+.brand>span{background:linear-gradient(135deg,var(--red),#c92730);box-shadow:0 6px 16px rgba(230,61,69,.35)}
+.sidebar nav button{border-radius:var(--radius-sm);transition:background .12s ease,color .12s ease}
+.sidebar nav button.active{background:linear-gradient(135deg,rgba(230,61,69,.22),rgba(230,61,69,.08));color:#fff;box-shadow:inset 0 0 0 1px rgba(230,61,69,.35)}
+.sidebar nav button em{background:var(--red)}
+.sidebar-help{background:linear-gradient(180deg,#232f3d,#1b2530);border-radius:var(--radius)}
+.admin-user>span{background:linear-gradient(135deg,#3a4756,#232f3d);border-radius:var(--radius-sm)}
+
+/* Topbar */
+.topbar{border-bottom:1px solid #eef1f4}
+.add-job,.sync-button,.auto-route-day,.queue-workspace-button{border-radius:999px!important;background:linear-gradient(135deg,var(--red),#c92730)!important;border-color:transparent!important;box-shadow:0 8px 18px -4px rgba(230,61,69,.4);transition:transform .08s ease,box-shadow .08s ease}
+.add-job:active,.sync-button:active,.auto-route-day:active,.queue-workspace-button:active{transform:translateY(1px) scale(.99);box-shadow:0 4px 10px -3px rgba(230,61,69,.4)}
+.sync-button{background:linear-gradient(135deg,var(--blue),#0f5fd6)!important;box-shadow:0 8px 18px -4px rgba(22,119,255,.4)}
+.board-button{border-radius:var(--radius-sm);box-shadow:var(--shadow-card)}
+
+/* Connection banner — elevated like a primary status card */
+.connection-banner{display:flex;align-items:center;gap:14px;background:linear-gradient(135deg,#eef6ff,#f7fbff);border:1px solid #d7e6fb;border-radius:var(--radius);padding:14px 18px;margin-bottom:16px;box-shadow:var(--shadow-card)}
+.connection-banner .connection-icon{width:38px;height:38px;border-radius:var(--radius-sm);background:linear-gradient(135deg,var(--blue),#0f5fd6);color:#fff;display:grid;place-items:center;font-weight:900;font-size:12px;box-shadow:0 6px 14px -4px rgba(22,119,255,.45)}
+.connection-banner em{font-style:normal;background:#fff;border-radius:999px;padding:6px 10px;font-size:10px;font-weight:900;letter-spacing:.5px;color:#147b57;box-shadow:0 0 0 1px #bde1cf}
+
+/* Cards / panels — rounded + soft shadow instead of flat 1px borders */
+.summary-bar,.empty-route,.ready-team,.map-panel,.runs-panel,.jobs-table,.jobs-empty,.settings-main,.tools-library,
+.decision-ranking,.decision-map-panel,.run-column,.dispatch-shell,.board-modal,.job-modal,.tech-modal,
+.settings-lock,.settings-note-panel,.runs-overview{
+  border-radius:var(--radius)!important; border-color:#e9edf1!important; box-shadow:var(--shadow-card);
+}
+.summary-icon{border-radius:var(--radius-sm)}
+.summary-item b{font-weight:850}
+.empty-copy,.job-summary,.best-match,.decision-job,.same-day-request,.service-area-setting{border-radius:var(--radius)!important;box-shadow:var(--shadow-card)}
+.decision-job{box-shadow:var(--shadow-raised)}
+
+/* Technician run columns / schedule cards — rounded, soft-tint, hover lift */
+.run-column{overflow:hidden}
+.run-column>header{background:linear-gradient(135deg,rgba(0,0,0,.015),rgba(0,0,0,0))}
+.timeline-job,.run-job,.schedule-card{border-radius:var(--radius-sm)!important;box-shadow:var(--shadow-card);transition:transform .1s ease,box-shadow .1s ease}
+.timeline-job:hover,.schedule-card:hover{transform:translateY(-1px)}
+.schedule-card{background:linear-gradient(180deg,#fff,#f6f9fe)}
+.column-empty{border-radius:var(--radius)}
+
+/* Dispatch board */
+.dispatch-toolbar button.active{border-radius:6px}
+.staff-cell>span,.map-tech>i,.tech-run>header>span,.ready-row>span,.run-column>header>span{border-radius:var(--radius-sm)!important}
+.waiting-panel>div>button{border-radius:var(--radius-sm)!important;box-shadow:var(--shadow-card);transition:transform .1s ease,box-shadow .1s ease}
+.waiting-panel>div>button:hover{transform:translateY(-1px)}
+
+/* Settings / modals */
+.overlay,.modal-overlay{backdrop-filter:blur(2px)}
+.job-modal,.tech-modal,.board-modal{border-radius:var(--radius-lg)!important;box-shadow:var(--shadow-raised)}
+.modal-header{border-top-left-radius:var(--radius-lg);border-top-right-radius:var(--radius-lg)}
+.form-section input,.form-section select,.form-section textarea,.tech-form-grid input,.tech-form-grid select{border-radius:var(--radius-sm)}
+.decision-assign,.job-modal footer .save-job,.tech-modal footer button:last-child,.allocation-drawer footer button:last-child{
+  border-radius:999px!important;background:linear-gradient(135deg,var(--red),#c92730)!important;border-color:transparent!important;box-shadow:0 8px 18px -4px rgba(230,61,69,.4);
+}
+.area-toggle{box-shadow:0 6px 14px -4px rgba(18,163,109,.4)}
+.service-area-setting.disabled .area-toggle{box-shadow:0 6px 14px -4px rgba(217,45,56,.4)}
