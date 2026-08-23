@@ -189,11 +189,12 @@ function isOutsideServiceArea(job: Job) {
 
 function scheduledWindow(job: Job) {
   if (!job.scheduledStart) return null;
-  const start = new Date(String(job.scheduledStart).replace(" ", "T"));
+  const start = parseSydneyWallClock(job.scheduledStart);
+  if (!start) return null;
   const end = job.scheduledEnd
-    ? new Date(String(job.scheduledEnd).replace(" ", "T"))
+    ? parseSydneyWallClock(job.scheduledEnd)
     : new Date(start.getTime() + Math.max(30, job.duration || 60) * 60000);
-  if (!Number.isFinite(start.getTime()) || !Number.isFinite(end.getTime())) return null;
+  if (!end || !Number.isFinite(start.getTime()) || !Number.isFinite(end.getTime())) return null;
   return { start, end };
 }
 
@@ -223,9 +224,7 @@ function roundDurationToQuarterMinutes(minutes: number) {
 }
 
 function parseServiceM8Date(value?: string | null) {
-  if (!value) return null;
-  const parsed = new Date(String(value).replace(" ", "T"));
-  return Number.isFinite(parsed.getTime()) ? parsed : null;
+  return parseSydneyWallClock(value);
 }
 
 function bookingEnd(start: Date, requestedEnd: Date | null, durationMinutes: number) {
@@ -238,6 +237,50 @@ function bookingEnd(start: Date, requestedEnd: Date | null, durationMinutes: num
 
 function sydneyDateKey(date = new Date()) {
   return new Intl.DateTimeFormat("en-CA", { timeZone: "Australia/Sydney", year: "numeric", month: "2-digit", day: "2-digit" }).format(date);
+}
+
+// ServiceM8 sends naive "YYYY-MM-DD HH:MM:SS" strings with no timezone info,
+// meaning the number is always a Sydney/Central Coast wall-clock time (the
+// only regions this business operates in). Handing that straight to
+// `new Date()` makes JS interpret it using whatever timezone the *device*
+// happens to be set to, which silently shifts every job by the Sydney/UTC
+// offset (10 or 11 hours depending on daylight saving) on any phone or
+// laptop that isn't itself set to Sydney time. These two helpers anchor
+// parsing and time-of-day extraction to Australia/Sydney explicitly so the
+// dashboard reads the same regardless of the viewing device's clock.
+function parseSydneyWallClock(value?: string | null): Date | null {
+  if (!value) return null;
+  const match = String(value).trim().match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?/);
+  if (!match) {
+    const fallback = new Date(String(value).replace(" ", "T"));
+    return Number.isFinite(fallback.getTime()) ? fallback : null;
+  }
+  const [, year, month, day, hour, minute, second] = match;
+  const utcGuess = Date.UTC(Number(year), Number(month) - 1, Number(day), Number(hour), Number(minute), Number(second || "0"));
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "Australia/Sydney", hour12: false,
+    year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit"
+  }).formatToParts(new Date(utcGuess)).reduce((acc: Record<string, string>, part) => {
+    if (part.type !== "literal") acc[part.type] = part.value;
+    return acc;
+  }, {});
+  const asIfSydney = Date.UTC(
+    Number(parts.year), Number(parts.month) - 1, Number(parts.day),
+    Number(parts.hour) === 24 ? 0 : Number(parts.hour), Number(parts.minute), Number(parts.second)
+  );
+  const offset = asIfSydney - utcGuess;
+  return new Date(utcGuess - offset);
+}
+
+function sydneyHourMinute(date: Date): { hour: number; minute: number } {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "Australia/Sydney", hour12: false, hour: "2-digit", minute: "2-digit"
+  }).formatToParts(date).reduce((acc: Record<string, string>, part) => {
+    if (part.type !== "literal") acc[part.type] = part.value;
+    return acc;
+  }, {});
+  const hour = Number(parts.hour);
+  return { hour: hour === 24 ? 0 : hour, minute: Number(parts.minute) };
 }
 
 function jobDateKey(job: Job) {
@@ -267,7 +310,7 @@ function serviceStatus(job: Job) {
 function planningWindowName(job: Job) {
   if (job.holdingWindow === "AM 8-11" || job.holdingWindow === "PM 12-4") return job.holdingWindow;
   const start = parseServiceM8Date(job.scheduledStart);
-  return start && start.getHours() >= 12 ? "PM 12-4" : "AM 8-11";
+  return start && sydneyHourMinute(start).hour >= 12 ? "PM 12-4" : "AM 8-11";
 }
 
 function isFutureStandardReplanCandidate(job: Job, dateKey: string) {
@@ -564,8 +607,8 @@ function optimiseWaitingAllocations(dateKey: string, waiting: Job[], technicians
   const toOptimizerJob = (job: Job, fixed: boolean): OptimizerJob => {
     const start = parseServiceM8Date(job.scheduledStart);
     const end = parseServiceM8Date(job.scheduledEnd);
-    const startMinute = start ? start.getHours() * 60 + start.getMinutes() : null;
-    const endMinute = end ? end.getHours() * 60 + end.getMinutes() : null;
+    const startMinute = start ? (m => m.hour * 60 + m.minute)(sydneyHourMinute(start)) : null;
+    const endMinute = end ? (m => m.hour * 60 + m.minute)(sydneyHourMinute(end)) : null;
     return {
       id: job.id,
       label: job.suburb || `Job #${job.id}`,
