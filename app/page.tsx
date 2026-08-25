@@ -773,6 +773,10 @@ export default function Home() {
       setEmbedded(window.self !== window.top || params.get("servicem8") === "1");
       focusedJobUUID.current = params.get("jobUUID") || params.get("job_uuid");
       setJobCardMode(Boolean(focusedJobUUID.current));
+      const requestedPage = params.get("page");
+      if (requestedPage === "Settings" || requestedPage === "Runs" || requestedPage === "Jobs" || requestedPage === "Routes") {
+        setPage(requestedPage);
+      }
     } catch {}
     try {
       const saved = localStorage.getItem(STORAGE);
@@ -819,8 +823,9 @@ export default function Home() {
       if (typeof data.syncedAt === "string") setLastSynced(data.syncedAt);
       setSyncing(false);
       if (typeof data.googleMapsKey === "string") setMapsKey(data.googleMapsKey);
-      if (Array.isArray(data.technicians) && data.technicians.length) {
+      if (Array.isArray(data.technicians)) {
         setTechs(current => {
+          if (!data.technicians.length) return [];
           const colors = ["#1677ff", "#ef4444", "#7c3aed", "#0f9f6e", "#f59e0b", "#0891b2", "#db2777", "#475569"];
           const liveTechs = data.technicians.map((person: any, index: number) => {
             const latitude = Number(person.latitude);
@@ -845,7 +850,7 @@ export default function Home() {
           });
           return mergeSharedSettingsIntoTechs(liveTechs, sharedSettingsRef.current);
         });
-        setBoardTechIds(current => current.length ? current : data.technicians.filter((person: any) => !person.holding).map((person: any) => person.id));
+        setBoardTechIds(current => data.technicians.length ? (current.length ? current : data.technicians.filter((person: any) => !person.holding).map((person: any) => person.id)) : []);
       }
       setLiveConnected(true);
       setLoaded(true);
