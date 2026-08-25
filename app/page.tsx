@@ -744,7 +744,7 @@ export default function Home() {
   const [loaded, setLoaded] = useState(false);
   const [embedded, setEmbedded] = useState(false);
   const [liveConnected, setLiveConnected] = useState(false);
-  const [mapsKey, setMapsKey] = useState("");
+  const [mapsKey, setMapsKey] = useState(process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY || "");
   const [boardTechIds, setBoardTechIds] = useState<string[]>([]);
   const [manageBoard, setManageBoard] = useState(false);
   const [lastSynced, setLastSynced] = useState("");
@@ -889,7 +889,7 @@ export default function Home() {
     version: 1,
     centralCoastEnabled: nextCentralCoastEnabled,
     tools: nextTools,
-    technicianOverrides: nextTechs.filter(tech => !tech.holding).map(tech => ({
+    technicianOverrides: nextTechs.map(tech => ({
       id: tech.id,
       name: tech.name,
       home: tech.home,
@@ -1322,6 +1322,13 @@ export default function Home() {
         }}
         edit={setEditTech}
         addTech={() => setAddTech(true)}
+        toggleTechActive={tech => {
+          const nextTechs = techs.map(t => t.id === tech.id ? { ...t, holding: !t.holding } : t);
+          const nextBoardIds = nextTechs.filter(t => !t.holding).map(t => t.id);
+          setTechs(nextTechs);
+          setBoardTechIds(nextBoardIds);
+          void saveSharedSettings(nextTechs, tools, centralCoastEnabled, `${tech.name} ${tech.holding ? "included in" : "removed from"} Auto Route`);
+        }}
         addTool={tool => {
           const cleaned = tool.trim();
           if (cleaned && !tools.includes(cleaned)) {
@@ -1562,7 +1569,7 @@ function RunsPage({ techs, jobs, add, review }: { techs: Technician[]; jobs: Job
   </section>
 }
 
-function Settings({ techs, tools, centralCoastEnabled, settingsUnlocked, settingsPin, settingsStatus, setSettingsPin, unlockSettings, toggleCentralCoast, edit, addTech, addTool, removeTool }: {
+function Settings({ techs, tools, centralCoastEnabled, settingsUnlocked, settingsPin, settingsStatus, setSettingsPin, unlockSettings, toggleCentralCoast, edit, addTech, toggleTechActive, addTool, removeTool }: {
   techs: Technician[];
   tools: string[];
   centralCoastEnabled: boolean;
@@ -1574,6 +1581,7 @@ function Settings({ techs, tools, centralCoastEnabled, settingsUnlocked, setting
   toggleCentralCoast: () => void;
   edit: (t: Technician) => void;
   addTech: () => void;
+  toggleTechActive: (t: Technician) => void;
   addTool: (s: string) => void;
   removeTool: (s: string) => void;
 }) {
@@ -1611,8 +1619,8 @@ function Settings({ techs, tools, centralCoastEnabled, settingsUnlocked, setting
         <div><small>SERVICE AREA CONTROL</small><h2>Central Coast routing is {centralCoastEnabled ? "ON" : "OFF"}</h2><p>{centralCoastEnabled ? "Central Coast jobs can auto-route under the Joel-only rule." : "Central Coast jobs stay visible but are treated as outside the active service area."}</p></div>
         <button className="area-toggle" role="switch" aria-checked={centralCoastEnabled} onClick={toggleCentralCoast}><span />{centralCoastEnabled ? "ON" : "OFF"}</button>
       </div>
-      <div className="settings-title"><div><h2>Technician Skills & Truck Equipment</h2><p>This is the shared truth used by the ServiceM8 job card and full dispatch board.</p></div><button onClick={addTech}>＋ Add Technician</button></div>
-      {techs.filter(t => !t.holding).map(t => <article className="technician-setting" key={t.id}><span className="setting-avatar" style={{ background: t.color }}>{t.name.slice(0, 2).toUpperCase()}</span><div className="setting-info"><h3>{t.name}</h3><p>{t.home} · {t.vehicle} · {t.status}</p><small>SKILLS</small><div className="tag-list">{t.skills.length ? t.skills.map(s => <i key={s}>{s}</i>) : <em>No skills configured</em>}</div><small>TOOLS IN TRUCK</small><div className="tag-list tools">{t.tools.length ? t.tools.map(s => <i key={s}>✓ {s}</i>) : <em>No special tools assigned</em>}</div></div><button className="edit-button" onClick={() => edit(t)}>Edit Technician & Truck</button></article>)}
+      <div className="settings-title"><div><h2>ServiceM8 Sales Technicians</h2><p>Imported from ServiceM8. Include only the sales technicians Auto Route / Quote should recommend.</p></div><button onClick={addTech}>＋ Add Technician</button></div>
+      {techs.map(t => <article className={`technician-setting ${t.holding ? "excluded-tech" : ""}`} key={t.id}><span className="setting-avatar" style={{ background: t.color }}>{t.name.slice(0, 2).toUpperCase()}</span><div className="setting-info"><h3>{t.name} {t.holding ? <em className="excluded-label">EXCLUDED</em> : <em className="included-label">AUTO ROUTE</em>}</h3><p>{t.home} · {t.vehicle} · {t.status}</p><small>SKILLS</small><div className="tag-list">{t.skills.length ? t.skills.map(s => <i key={s}>{s}</i>) : <em>No skills configured</em>}</div><small>TOOLS IN TRUCK</small><div className="tag-list tools">{t.tools.length ? t.tools.map(s => <i key={s}>✓ {s}</i>) : <em>No special tools assigned</em>}</div></div><div className="setting-actions"><button className="edit-button" onClick={() => edit(t)}>Edit Technician & Truck</button><button className={t.holding ? "include-button" : "remove-button"} onClick={() => toggleTechActive(t)}>{t.holding ? "Include in Auto Route" : "Remove from Auto Route"}</button></div></article>)}
     </section>
     <aside className="tools-library">
       <h2>Master Tools List</h2>
