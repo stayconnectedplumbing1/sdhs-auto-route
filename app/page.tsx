@@ -43,8 +43,8 @@ const SERVICES: Record<string, { skill: string; tool: string; duration: number; 
 };
 const EMERGENCY_RULES = [
   { pattern: /(?:blocked|blockage|block).{0,28}(?:drain|toilet)|(?:drain|toilet).{0,28}(?:blocked|blockage)/i, skill: "Blocked Drains", tool: "High-pressure jetter", duration: 90 },
-  { pattern: /(?:no hot water|hot water).{0,36}(?:replace|replacement|repair|not working|leak|system)|(?:replace|replacement|repair).{0,36}hot water/i, skill: "Hot Water", tool: "Hot water tools", duration: 90 },
-  { pattern: /burst.{0,24}(?:pipe|water|line)|(?:pipe|water|line).{0,24}burst/i, skill: "General Plumbing", tool: "", duration: 90 },
+  { pattern: /(?:\bh\s*w\s*s\b|\bhws\b|hot\s*water|water\s*heater|thermann|rheem|dux).{0,45}(?:leak|leaking|burst|repair|replace|replacement|not\s*working|no\s*hot\s*water|fault|system)|(?:leak|leaking|burst|repair|replace|replacement|not\s*working|fault).{0,45}(?:\bh\s*w\s*s\b|\bhws\b|hot\s*water|water\s*heater|thermann|rheem|dux)/i, skill: "Hot Water", tool: "Hot water tools", duration: 90 },
+  { pattern: /burst.{0,24}(?:pipe|water|line)|(?:pipe|water|line).{0,24}burst|flood(?:ed|ing)?|water\s+(?:everywhere|pouring|gushing|running)|overflow(?:ing)?/i, skill: "General Plumbing", tool: "", duration: 90 },
   { pattern: /gas.{0,24}leak|leak.{0,24}gas/i, skill: "Gas", tool: "Gas testing equipment", duration: 90 }
 ];
 const SUBURBS: Record<string, { x: number; y: number }> = {
@@ -833,8 +833,8 @@ export default function Home() {
               home: existing?.home || person.home || "Sydney",
               vehicle: existing?.vehicle || "Service vehicle",
               status: person.status || "Available",
-              skills: existing?.skills || ["General Plumbing"],
-              tools: existing?.tools || [],
+              skills: Array.isArray(person.skills) && person.skills.length ? person.skills : (existing?.skills || ["General Plumbing"]),
+              tools: Array.isArray(person.tools) ? person.tools : (existing?.tools || []),
               color: existing?.color || colors[index % colors.length],
               x: existing?.x || 50,
               y: existing?.y || 50,
