@@ -1,0 +1,3 @@
+Deploy trigger for Auto Route
+Timestamp: 2026-08-26T09:00:00+10:00
+Includes full embedded Auto Route / Quote logic.
