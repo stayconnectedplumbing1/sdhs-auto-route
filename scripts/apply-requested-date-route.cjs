@@ -14,17 +14,8 @@ function replaceOnce(from, to, label) {
   source = source.replace(from, to);
 }
 
-replaceOnce(
-  text([
-    'function sydneyDateKey(date = new Date()) {',
-    '  return new Intl.DateTimeFormat("en-CA", { timeZone: "Australia/Sydney", year: "numeric", month: "2-digit", day: "2-digit" }).format(date);',
-    '}',
-    ''
-  ]),
-  text([
-    'function sydneyDateKey(date = new Date()) {',
-    '  return new Intl.DateTimeFormat("en-CA", { timeZone: "Australia/Sydney", year: "numeric", month: "2-digit", day: "2-digit" }).format(date);',
-    '}',
+if (!source.includes("function addSydneyDays(")) {
+  const addSydneyDaysBlock = text([
     '',
     'function addSydneyDays(dateKey: string, days: number) {',
     '  const [year, month, day] = dateKey.split("-").map(Number);',
@@ -32,9 +23,41 @@ replaceOnce(
     '  return `${next.getUTCFullYear()}-${String(next.getUTCMonth() + 1).padStart(2, "0")}-${String(next.getUTCDate()).padStart(2, "0")}`;',
     '}',
     ''
-  ]),
-  "addSydneyDays"
-);
+  ]);
+  if (source.includes("function normaliseUUID(value: unknown) {")) {
+    replaceOnce(
+      text([
+        'function normaliseUUID(value: unknown) {',
+        '  return String(value || "").trim().toLowerCase();',
+        '}',
+        ''
+      ]),
+      text([
+        'function normaliseUUID(value: unknown) {',
+        '  return String(value || "").trim().toLowerCase();',
+        '}',
+        addSydneyDaysBlock
+      ]),
+      "addSydneyDays after normaliseUUID"
+    );
+  } else {
+    replaceOnce(
+      text([
+        'function sydneyDateKey(date = new Date()) {',
+        '  return new Intl.DateTimeFormat("en-CA", { timeZone: "Australia/Sydney", year: "numeric", month: "2-digit", day: "2-digit" }).format(date);',
+        '}',
+        ''
+      ]),
+      text([
+        'function sydneyDateKey(date = new Date()) {',
+        '  return new Intl.DateTimeFormat("en-CA", { timeZone: "Australia/Sydney", year: "numeric", month: "2-digit", day: "2-digit" }).format(date);',
+        '}',
+        addSydneyDaysBlock
+      ]),
+      "addSydneyDays"
+    );
+  }
+}
 
 replaceOnce(
   'type RecommendationOptions = { sameDayRequested?: boolean; plannedRoute?: boolean; deferCommit?: boolean; reloadAfterBooking?: boolean };',
