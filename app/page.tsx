@@ -1079,7 +1079,7 @@ export default function Home() {
       : (job.priority === "Urgent" || sameDayRequested || !job.scheduledStart)
       ? roundUpToQuarterHour(new Date(Date.now() + ((job.priority === "Urgent" || sameDayRequested) ? routeCheck.eta : 5) * 60000))
       : roundUpToQuarterHour(plannedStart || new Date());
-    const bookingDuration = Math.max(30, job.duration || 30);
+    const bookingDuration = serviceStatus(job) === "quote" ? 30 : Math.max(30, job.duration || 30);
     let end = sameDayRequested && sameDayEnd
       ? sameDayEnd
       : bookingEnd(start, (respectAllocation || (job.priority !== "Urgent" && job.scheduledEnd)) ? plannedEnd : null, bookingDuration);
