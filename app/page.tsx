@@ -1146,18 +1146,24 @@ export default function Home() {
         return shifts;
       }
       if (job.priority !== "Urgent" || respectAllocation) return [];
-      const travelBuffer = 15 * 60000;
-      let occupiedUntil = end.getTime() + travelBuffer;
       const activeJobId = currentBooking(techId, sameDay)?.job.id;
       const future = sameDay
         .filter(existing => {
           const window = scheduledWindow(existing);
-          return existing.id !== activeJobId && existing.priority !== "Urgent" && existing.activityUUID && window && window.end.getTime() > start.getTime();
+          return existing.id !== activeJobId
+            && existing.priority !== "Urgent"
+            && existing.activityUUID
+            && window
+            && window.end.getTime() > start.getTime();
         })
         .sort((a, b) => (scheduledWindow(a)?.start.getTime() || 0) - (scheduledWindow(b)?.start.getTime() || 0));
+
+      // Urgent jobs are inserted into the selected technician's run now/next.
+      // Push later standard appointments back one hour so the ServiceM8 diary
+      // shows the urgent job on that run instead of leaving the next booking in place.
       for (const existing of future) {
         const window = scheduledWindow(existing);
-        if (!window || window.start.getTime() >= occupiedUntil) continue;
+        if (!window) continue;
         const shiftedStart = roundUpToQuarterHour(new Date(window.start.getTime() + 60 * 60000));
         const shiftedEnd = bookingEnd(shiftedStart, new Date(window.end.getTime() + 60 * 60000), existing.duration);
         shifts.push({
@@ -1167,7 +1173,6 @@ export default function Home() {
           startDate: serviceM8Time(shiftedStart),
           endDate: serviceM8Time(shiftedEnd)
         });
-        occupiedUntil = shiftedEnd.getTime() + travelBuffer;
       }
       return shifts;
     })();
