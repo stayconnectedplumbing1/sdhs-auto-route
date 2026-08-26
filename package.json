@@ -7,7 +7,7 @@
   },
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
+    "build": "node scripts/apply-requested-date-route.cjs && next build",
     "start": "next start -p ${PORT:-3000}",
     "test": "next build && node --experimental-strip-types --test tests/*.test.mjs",
     "install:ci": "npm ci",
