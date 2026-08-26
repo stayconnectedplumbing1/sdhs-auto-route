@@ -239,6 +239,10 @@ function sydneyDateKey(date = new Date()) {
   return new Intl.DateTimeFormat("en-CA", { timeZone: "Australia/Sydney", year: "numeric", month: "2-digit", day: "2-digit" }).format(date);
 }
 
+function normaliseUUID(value: unknown) {
+  return String(value || "").trim().toLowerCase();
+}
+
 // ServiceM8 sends naive "YYYY-MM-DD HH:MM:SS" strings with no timezone info,
 // meaning the number is always a Sydney/Central Coast wall-clock time (the
 // only regions this business operates in). Handing that straight to
@@ -817,9 +821,10 @@ export default function Home() {
       if (data.source !== "servicem8-auto-route" || !Array.isArray(data.jobs)) return;
       const incomingJobs = data.jobs.map(normaliseRoutingJob);
       setJobs(incomingJobs);
-      const requestedJobUUID = String(data.focusJobUUID || focusedJobUUID.current || "").trim();
+      const requestedJobUUID = normaliseUUID(data.focusJobUUID || focusedJobUUID.current);
+      if (requestedJobUUID) focusedJobUUID.current = requestedJobUUID;
       if (requestedJobUUID && !focusedJobOpened.current) {
-        const selectedJob = incomingJobs.find((job: Job) => String(job.serviceM8UUID || "") === requestedJobUUID);
+        const selectedJob = incomingJobs.find((job: Job) => normaliseUUID(job.serviceM8UUID) === requestedJobUUID);
         if (selectedJob) {
           focusedJobOpened.current = true;
           setJobCardMode(true);
@@ -1252,8 +1257,9 @@ export default function Home() {
   }, [activeAutoRoutePlan]);
   const removeAllJobs = () => { setJobs([]); setSelectedTech(null); showToast("All test jobs cleared") };
 
-  const jobCardJob = focusedJobUUID.current
-    ? boardJobs.find(job => String(job.serviceM8UUID || "") === focusedJobUUID.current)
+  const focusedJobKey = normaliseUUID(focusedJobUUID.current);
+  const jobCardJob = focusedJobKey
+    ? boardJobs.find(job => normaliseUUID(job.serviceM8UUID) === focusedJobKey)
     : null;
 
   if (jobCardMode) {
