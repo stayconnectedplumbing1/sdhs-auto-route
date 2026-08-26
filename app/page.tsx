@@ -771,6 +771,7 @@ export default function Home() {
   const pendingBookingRef = useRef<PendingBookingCommit | null>(null);
   const [jobCardMode, setJobCardMode] = useState(false);
   const focusedJobUUID = useRef<string | null>(null);
+  const focusedJobNumber = useRef<number | null>(null);
   const focusedJobOpened = useRef(false);
   const [settingsPin, setSettingsPin] = useState("");
   const [settingsUnlocked, setSettingsUnlocked] = useState(false);
@@ -822,9 +823,14 @@ export default function Home() {
       const incomingJobs = data.jobs.map(normaliseRoutingJob);
       setJobs(incomingJobs);
       const requestedJobUUID = normaliseUUID(data.focusJobUUID || focusedJobUUID.current);
+      const requestedJobNumber = Number(data.focusJobNumber || 0) || null;
       if (requestedJobUUID) focusedJobUUID.current = requestedJobUUID;
-      if (requestedJobUUID && !focusedJobOpened.current) {
-        const selectedJob = incomingJobs.find((job: Job) => normaliseUUID(job.serviceM8UUID) === requestedJobUUID);
+      if (requestedJobNumber) focusedJobNumber.current = requestedJobNumber;
+      if ((requestedJobUUID || requestedJobNumber) && !focusedJobOpened.current) {
+        const selectedJob = incomingJobs.find((job: Job) =>
+          (requestedJobUUID && normaliseUUID(job.serviceM8UUID) === requestedJobUUID)
+          || (requestedJobNumber && Number(job.id) === requestedJobNumber)
+        );
         if (selectedJob) {
           focusedJobOpened.current = true;
           setJobCardMode(true);
@@ -1258,8 +1264,11 @@ export default function Home() {
   const removeAllJobs = () => { setJobs([]); setSelectedTech(null); showToast("All test jobs cleared") };
 
   const focusedJobKey = normaliseUUID(focusedJobUUID.current);
+  const focusedJobId = focusedJobNumber.current;
   const jobCardJob = focusedJobKey
-    ? boardJobs.find(job => normaliseUUID(job.serviceM8UUID) === focusedJobKey)
+    ? boardJobs.find(job => normaliseUUID(job.serviceM8UUID) === focusedJobKey) || (focusedJobId ? boardJobs.find(job => Number(job.id) === focusedJobId) : null)
+    : focusedJobId
+    ? boardJobs.find(job => Number(job.id) === focusedJobId)
     : null;
 
   if (jobCardMode) {
