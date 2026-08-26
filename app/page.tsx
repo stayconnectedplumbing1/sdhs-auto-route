@@ -307,6 +307,10 @@ function serviceStatus(job: Job) {
   return status.includes("complete") ? "completed" : status.includes("work") ? "work-order" : "quote";
 }
 
+function quoteRouteDuration(job: Job) {
+  return serviceStatus(job) === "quote" ? 30 : Math.max(30, job.duration || 30);
+}
+
 function planningWindowName(job: Job) {
   if (job.holdingWindow === "AM 8-11" || job.holdingWindow === "PM 12-4") return job.holdingWindow;
   const start = parseServiceM8Date(job.scheduledStart);
@@ -395,8 +399,8 @@ function sameDayStandardSlot(tech: Technician, job: Job, jobs: Job[], now = new 
   const dateKey = sydneyDateKey(now);
   const windowStart = new Date(`${dateKey}T${String(requested.startHour).padStart(2, "0")}:00:00`);
   const windowEnd = new Date(`${dateKey}T${String(requested.endHour).padStart(2, "0")}:00:00`);
-  const dayEnd = new Date(`${dateKey}T20:00:00`);
-  const durationMinutes = Math.max(30, job.duration || 30);
+  const dayEnd = windowEnd;
+  const durationMinutes = quoteRouteDuration(job);
   const existing = buildRemainingRun(tech, jobs.filter(item => item.id !== job.id), dateKey, now);
   const jobPoint = routePoint(job);
   const travelMinutes = (from: RoutePoint, to: RoutePoint) => Math.max(10, Math.round(routeDistance(from, to) * 1.7));
@@ -449,6 +453,7 @@ function sameDayStandardSlot(tech: Technician, job: Job, jobs: Job[], now = new 
       previousPoint
     });
     const earliestStart = roundUpToQuarterHour(new Date(previousReady.getTime() + travelMinutes(previousPoint, jobPoint) * 60000));
+    if (earliestStart.getTime() < windowStart.getTime() || earliestStart.getTime() > windowEnd.getTime()) continue;
     const end = new Date(earliestStart.getTime() + durationMinutes * 60000);
     if (end.getTime() > dayEnd.getTime()) continue;
 
@@ -511,6 +516,7 @@ function sameDayStandardSlot(tech: Technician, job: Job, jobs: Job[], now = new 
     : new Date(Math.max(windowStart.getTime(), now.getTime()));
   const start = roundUpToQuarterHour(new Date(previousReady.getTime() + travelMinutes(previousPoint, jobPoint) * 60000));
   const end = new Date(start.getTime() + durationMinutes * 60000);
+  if (start.getTime() < windowStart.getTime() || end.getTime() > dayEnd.getTime()) return null;
   return {
     start,
     end,
@@ -1718,7 +1724,7 @@ function JobCardDecision({ job, jobs, techs, mapsKey, connected, syncing, sync, 
           <div className="decision-requirements">
             <div><small>REQUIRED SKILL</small><b>{job.requiredSkill}</b></div>
             <div><small>REQUIRED TOOL</small><b>{job.requiredTool || "No special tool"}</b></div>
-            <div><small>JOB DURATION</small><b>{job.duration} minutes</b></div>
+            <div><small>BOOKING DURATION</small><b>{sameDayRequested && serviceStatus(job) === "quote" ? "30 minutes quote" : `${job.duration} minutes`}</b></div>
             <div><small>BOOKING RULE</small><b>{job.priority === "Urgent" ? "Same day — next realistic slot" : sameDayRequested ? "Customer requested today · whole-day route insertion" : job.holdingWindow || job.bookingDay}</b></div>
           </div>
           <div className="decision-tech-list">{scores.map((score, index) => {
