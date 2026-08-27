@@ -1070,6 +1070,25 @@ export default function Home() {
   };
   const sendBooking = (payload: any) => {
     const token = directSessionTokenRef.current;
+    if (standaloneServiceM8Ref.current) {
+      void (async () => {
+        try {
+          const response = await fetch("/api/servicem8/standalone-book", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(payload),
+            cache: "no-store"
+          });
+          const data = await response.json().catch(() => ({}));
+          if (!response.ok) throw new Error(data.error || `Booking failed (${response.status})`);
+          setBookingResult({ status: "success", jobUUID: String(data.jobUUID || payload.jobUUID || ""), message: "", nonce: Date.now() });
+          if (payload.reloadAfterBooking !== false) await refreshStandaloneServiceM8();
+        } catch (error) {
+          setBookingResult({ status: "error", jobUUID: String(payload.jobUUID || ""), message: error instanceof Error ? error.message : "ServiceM8 rejected the booking", nonce: Date.now() });
+        }
+      })();
+      return;
+    }
     if (!token) {
       window.parent?.postMessage(payload, "*");
       return;
