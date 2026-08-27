@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
 
@@ -71,7 +71,7 @@ function actionRequired(job: Row, queueNames = new Map<string, string>()) {
     || String(job.is_action_required || "") === "1";
 }
 
-export async function GET(request: NextRequest) {
+export async function GET() {
   const token = String(process.env.SERVICEM8_API_KEY || "").trim();
   if (!token) return NextResponse.json({ error: "SERVICEM8_API_KEY is not configured" }, { status: 503 });
 
@@ -80,11 +80,10 @@ export async function GET(request: NextRequest) {
     const horizon = addDays(today, 8);
     const activityFilter = encodeURIComponent(`start_date gt '${today} 00:00:00' and start_date lt '${horizon} 00:00:00'`);
     const activeJobFilter = encodeURIComponent("active eq 1");
-    const [activitiesRaw, staffRaw, activeJobsRaw, settingsResponse] = await Promise.all([
+    const [activitiesRaw, staffRaw, activeJobsRaw] = await Promise.all([
       sm8<Row[]>(`jobactivity.json?%24filter=${activityFilter}`, token),
       sm8<Row[]>("staff.json", token),
-      trySm8<Row[]>(`job.json?%24filter=${activeJobFilter}`, token, []),
-      fetch(new URL("/api/settings", request.url), { cache: "no-store" }).then(response => response.ok ? response.json() : null).catch(() => null)
+      trySm8<Row[]>(`job.json?%24filter=${activeJobFilter}`, token, [])
     ]);
 
     const activities = activitiesRaw.filter(activity => String(activity.active ?? "1") !== "0" && String(activity.activity_was_scheduled ?? "1") !== "0");
@@ -158,21 +157,16 @@ export async function GET(request: NextRequest) {
       };
     });
 
-    const settings = settingsResponse?.settings || settingsResponse || {};
-    const configuredProfiles: Row[] = Array.isArray(settings.technicianOverrides) ? settings.technicianOverrides : [];
-    const configured = configuredProfiles.filter((tech: Row) => !tech.holding && (!Array.isArray(tech.roles) || tech.roles.includes("sales")));
-    const configuredHolding = configuredProfiles.filter((tech: Row) => tech.holding);
     const activeStaff = staffRaw.filter(staff => String(staff.active ?? "1") !== "0" && String(staff.hide_from_schedule ?? "0") !== "1");
     const scheduledStaff = new Set(activities.map(activity => String(activity.staff_uuid || "")).filter(Boolean));
     const colors = ["#1677ff", "#ef4444", "#7c3aed", "#0f9f6e", "#f59e0b", "#0891b2", "#db2777", "#475569"];
-    const normalName = (value: string) => value.toLowerCase().replace(/[^a-z0-9]/g, "");
-    const selected = configured.length
-      ? [...configured, ...configuredHolding]
-      : activeStaff.filter(staff => scheduledStaff.has(String(staff.uuid || "")));
+    // Shared roles and skills are loaded by the page's /api/settings request and
+    // merged into these live ServiceM8 staff records. Avoid calling our own
+    // public URL from this server route; on Railway that self-request could
+    // stall the whole add-on sync before eventually falling back.
+    const selected = activeStaff.filter(staff => scheduledStaff.has(String(staff.uuid || "")));
     const technicians = selected.map((profile: Row, index: number) => {
-      const staff = configured.length
-        ? activeStaff.find(item => String(item.uuid || "") === String(profile.id || "") || normalName(fullName(item)) === normalName(String(profile.name || "")))
-        : profile;
+      const staff = profile;
       return {
         id: String(staff?.uuid || profile.id || ""),
         name: String(profile.name || fullName(staff || profile)),
