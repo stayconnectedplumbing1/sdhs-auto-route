@@ -57,8 +57,9 @@ function classify(job: Row) {
   return { service: "General enquiry", skill: "General Plumbing", tool: "", priority: "Standard", duration: 60 };
 }
 
-function actionRequired(job: Row) {
-  return /action\s*required/i.test(String(job.queue_name || job.queue || ""))
+function actionRequired(job: Row, queueNames = new Map<string, string>()) {
+  const queueName = String(job.queue_name || job.queue || queueNames.get(String(job.queue_uuid || "")) || "");
+  return /action\s*required/i.test(queueName)
     || String(job.is_action_required || "").toLowerCase() === "true"
     || String(job.is_action_required || "") === "1";
 }
@@ -72,21 +73,31 @@ export async function GET(request: NextRequest) {
     const horizon = addDays(today, 8);
     const activityFilter = encodeURIComponent(`start_date gt '${today} 00:00:00' and start_date lt '${horizon} 00:00:00'`);
     const activeJobFilter = encodeURIComponent("active eq 1");
-    const [activitiesRaw, staffRaw, activeJobsRaw, settingsResponse] = await Promise.all([
+    const [activitiesRaw, staffRaw, activeJobsRaw, queuesRaw, settingsResponse] = await Promise.all([
       sm8<Row[]>(`jobactivity.json?%24filter=${activityFilter}`, token),
       sm8<Row[]>("staff.json", token),
       trySm8<Row[]>(`job.json?%24filter=${activeJobFilter}`, token, []),
+      trySm8<Row[]>("queue.json", token, []),
       fetch(new URL("/api/settings", request.url), { cache: "no-store" }).then(response => response.ok ? response.json() : null).catch(() => null)
     ]);
 
     const activities = activitiesRaw.filter(activity => String(activity.active ?? "1") !== "0" && String(activity.activity_was_scheduled ?? "1") !== "0");
-    const waitingJobs = activeJobsRaw.filter(actionRequired);
+    const queueNames = new Map(queuesRaw.map(queue => [String(queue.uuid || ""), String(queue.name || queue.queue_name || "")]));
+    const waitingJobs = activeJobsRaw.filter(job => actionRequired(job, queueNames));
     const waitingByUUID = new Map(waitingJobs.map(job => [String(job.uuid || ""), job]));
     const jobUUIDs = Array.from(new Set([
       ...activities.map(activity => String(activity.job_uuid || "")),
       ...waitingJobs.map(job => String(job.uuid || ""))
     ].filter(Boolean)));
-    const jobsByUUID = new Map<string, Row>(waitingByUUID);
+    // The active-job response already contains almost every scheduled job. Seed
+    // the lookup from it so dashboard loading does not make one API request per
+    // appointment (which previously made the add-on appear to hang).
+    const jobsByUUID = new Map<string, Row>(
+      activeJobsRaw
+        .map(job => [String(job.uuid || ""), job] as const)
+        .filter(([uuid]) => Boolean(uuid))
+    );
+    for (const [uuid, job] of waitingByUUID) jobsByUUID.set(uuid, job);
 
     await Promise.all(jobUUIDs.filter(uuid => !jobsByUUID.has(uuid)).map(async uuid => {
       const rows = await trySm8<Row[]>(`job.json?%24filter=${encodeURIComponent(`uuid eq '${uuid}'`)}`, token, []);
@@ -131,8 +142,8 @@ export async function GET(request: NextRequest) {
         activityUUID: activity?.uuid ? String(activity.uuid) : null,
         allocationUUID: null,
         holdingWindow: null,
-        isActionRequired: actionRequired(job) && !activity,
-        queueName: String(job.queue_name || ""),
+        isActionRequired: actionRequired(job, queueNames) && !activity,
+        queueName: String(job.queue_name || queueNames.get(String(job.queue_uuid || "")) || ""),
         jobStatus: String(job.status || "Quote"),
         scheduledDate: start ? start.slice(0, 10) : today,
         serviceM8UUID: uuid
