@@ -5,11 +5,16 @@ import { optimiseWholeDayRoutes, type OptimizerJob } from "./global-route-optimi
 import "./status-colors.css";
 
 type TechStatus = "Available" | "On Site" | "Driving" | "Off";
+type StaffRole = "sales" | "installer";
 type Technician = {
   id: string; name: string; home: string; vehicle: string; status: TechStatus;
   skills: string[]; tools: string[]; color: string; x: number; y: number;
   latitude?: number | null; longitude?: number | null;
   holding?: boolean;
+  roles: StaffRole[];
+  workDays?: number[];
+  shiftStart?: string;
+  shiftHours?: number;
 };
 type Priority = "Urgent" | "High" | "Standard";
 type BookingDay = "Today" | "Tomorrow" | "Day After";
@@ -28,7 +33,12 @@ const DEFAULT_TOOLS = [
   "Gas testing equipment", "Roofing equipment", "Electrical testing equipment",
   "Hot water tools", "Ladders", "Drain locator", "Wet vacuum"
 ];
-const SKILLS = ["General Plumbing", "Blocked Drains", "Hot Water", "Gas", "Roofing", "Leak Detection", "Electrical", "Waterproofing"];
+const SKILLS = [
+  "General Plumbing", "Blocked Drains", "Hot Water", "Hot Water Installation", "Gas", "Roofing", "Guttering",
+  "Gutter Cleaning", "Leak Detection", "Electrical", "Waterproofing", "Regrouting", "Drainage Replacement",
+  "Pipe Relining", "Bathroom Renovation Plumbing", "Shower Screens", "Toilet Replacement", "Vanity Replacement"
+];
+const WORK_DAYS = [[1, "Mon"], [2, "Tue"], [3, "Wed"], [4, "Thu"], [5, "Fri"], [6, "Sat"], [0, "Sun"]] as const;
 const SERVICES: Record<string, { skill: string; tool: string; duration: number; urgent: boolean }> = {
   "Blocked drain or toilet": { skill: "Blocked Drains", tool: "High-pressure jetter", duration: 90, urgent: true },
   "Hot water replacement or repair": { skill: "Hot Water", tool: "Hot water tools", duration: 90, urgent: true },
@@ -58,9 +68,9 @@ const SUBURBS: Record<string, { x: number; y: number }> = {
 };
 const HOME: Record<string, { x: number; y: number }> = { Merrylands: SUBURBS.Merrylands, "Baulkham Hills": SUBURBS["Baulkham Hills"], Gladesville: SUBURBS.Gladesville };
 const INITIAL_TECHS: Technician[] = [
-  { id: "kerem", name: "Kerem", home: "Merrylands", vehicle: "Toyota HiAce", status: "Available", skills: ["General Plumbing", "Hot Water", "Gas", "Leak Detection"], tools: ["Leak detection equipment", "Gas testing equipment", "Hot water tools", "Ladders"], color: "#1677ff", ...HOME.Merrylands },
-  { id: "tom", name: "Tom", home: "Baulkham Hills", vehicle: "Ford Ranger", status: "Available", skills: ["General Plumbing", "Blocked Drains", "Hot Water", "Gas"], tools: ["High-pressure jetter", "CCTV drain camera", "Drain locator", "Hot water tools", "Gas testing equipment"], color: "#f04438", ...HOME["Baulkham Hills"] },
-  { id: "raf", name: "Raf", home: "Gladesville", vehicle: "Isuzu D-Max", status: "Available", skills: ["General Plumbing", "Roofing", "Leak Detection", "Waterproofing"], tools: ["Roofing equipment", "Leak detection equipment", "Ladders"], color: "#7a5af8", ...HOME.Gladesville }
+  { id: "kerem", name: "Kerem", home: "Merrylands", vehicle: "Toyota HiAce", status: "Available", skills: ["General Plumbing", "Hot Water", "Gas", "Leak Detection"], tools: ["Leak detection equipment", "Gas testing equipment", "Hot water tools", "Ladders"], color: "#1677ff", roles: ["sales"], ...HOME.Merrylands },
+  { id: "tom", name: "Tom", home: "Baulkham Hills", vehicle: "Ford Ranger", status: "Available", skills: ["General Plumbing", "Blocked Drains", "Hot Water", "Gas"], tools: ["High-pressure jetter", "CCTV drain camera", "Drain locator", "Hot water tools", "Gas testing equipment"], color: "#f04438", roles: ["sales"], ...HOME["Baulkham Hills"] },
+  { id: "raf", name: "Raf", home: "Gladesville", vehicle: "Isuzu D-Max", status: "Available", skills: ["General Plumbing", "Roofing", "Leak Detection", "Waterproofing"], tools: ["Roofing equipment", "Leak detection equipment", "Ladders"], color: "#7a5af8", roles: ["sales"], ...HOME.Gladesville }
 ];
 const STORAGE = "sdhs-auto-route-v5";
 const CENTRAL_COAST_SETTING = "sdhs-central-coast-enabled";
@@ -73,6 +83,10 @@ type SharedTechnicianOverride = {
   id: string; name: string; home: string; vehicle: string;
   skills: string[]; tools: string[]; color: string; x: number; y: number;
   holding?: boolean;
+  roles?: StaffRole[];
+  workDays?: number[];
+  shiftStart?: string;
+  shiftHours?: number;
 };
 type SharedSettings = {
   version: number;
@@ -87,13 +101,26 @@ function uniqueList(values: string[]) {
   return Array.from(new Set(values.map(value => String(value || "").trim()).filter(Boolean)));
 }
 
+function normaliseRoles(values: unknown, holding = false): StaffRole[] {
+  if (!Array.isArray(values)) return holding ? [] : ["sales"];
+  return Array.from(new Set(values
+    .map(value => String(value || "").trim())
+    .filter((value): value is StaffRole => value === "sales" || value === "installer")));
+}
+
+function normaliseWorkDays(values: unknown) {
+  if (!Array.isArray(values)) return [1, 2, 3, 4, 5];
+  const days = Array.from(new Set(values.map(Number).filter(value => Number.isInteger(value) && value >= 0 && value <= 6)));
+  return days.length ? days : [1, 2, 3, 4, 5];
+}
+
 function normaliseSharedSettings(settings?: Partial<SharedSettings> | null): SharedSettings {
   const tools = uniqueList(settings?.tools || DEFAULT_TOOLS);
   const centralCoastValue = typeof settings?.centralCoastRoutingEnabled === "boolean"
     ? settings.centralCoastRoutingEnabled
     : settings?.centralCoastEnabled;
   return {
-    version: 1,
+    version: 2,
     centralCoastEnabled: centralCoastValue !== false,
     tools: tools.length ? tools : DEFAULT_TOOLS,
     technicianOverrides: Array.isArray(settings?.technicianOverrides)
@@ -107,11 +134,16 @@ function normaliseSharedSettings(settings?: Partial<SharedSettings> | null): Sha
           color: String(tech.color || "#1677ff"),
           x: Number.isFinite(Number(tech.x)) ? Number(tech.x) : 50,
           y: Number.isFinite(Number(tech.y)) ? Number(tech.y) : 50,
-          holding: Boolean(tech.holding)
+          holding: Boolean(tech.holding),
+          roles: normaliseRoles(tech.roles, Boolean(tech.holding)),
+          workDays: normaliseWorkDays(tech.workDays),
+          shiftStart: /^\d{2}:\d{2}$/.test(String(tech.shiftStart || "")) ? String(tech.shiftStart) : "07:00",
+          shiftHours: Math.min(12, Math.max(1, Number(tech.shiftHours) || 9))
         })).filter(tech => tech.id && tech.name)
       : INITIAL_TECHS.map(tech => ({
           id: tech.id, name: tech.name, home: tech.home, vehicle: tech.vehicle,
-          skills: tech.skills, tools: tech.tools, color: tech.color, x: tech.x, y: tech.y, holding: tech.holding
+          skills: tech.skills, tools: tech.tools, color: tech.color, x: tech.x, y: tech.y, holding: tech.holding,
+          roles: tech.roles, workDays: tech.workDays, shiftStart: tech.shiftStart, shiftHours: tech.shiftHours
         })),
     updatedAt: settings?.updatedAt
   };
@@ -131,7 +163,11 @@ function mergeSharedSettingsIntoTechs(techs: Technician[], settings: SharedSetti
       color: override.color || tech.color,
       x: Number.isFinite(override.x) ? override.x : tech.x,
       y: Number.isFinite(override.y) ? override.y : tech.y,
-      holding: tech.holding || override.holding
+      holding: tech.holding || override.holding,
+      roles: override.roles || tech.roles,
+      workDays: override.workDays || tech.workDays,
+      shiftStart: override.shiftStart || tech.shiftStart,
+      shiftHours: override.shiftHours || tech.shiftHours
     };
   });
 }
@@ -243,6 +279,12 @@ function normaliseUUID(value: unknown) {
   return String(value || "").trim().toLowerCase();
 }
 
+function addSydneyDays(dateKey: string, days: number) {
+  const [year, month, day] = dateKey.split("-").map(Number);
+  const next = new Date(Date.UTC(year, month - 1, day + days));
+  return `${next.getUTCFullYear()}-${String(next.getUTCMonth() + 1).padStart(2, "0")}-${String(next.getUTCDate()).padStart(2, "0")}`;
+}
+
 // ServiceM8 sends naive "YYYY-MM-DD HH:MM:SS" strings with no timezone info,
 // meaning the number is always a Sydney/Central Coast wall-clock time (the
 // only regions this business operates in). Handing that straight to
@@ -336,7 +378,7 @@ function priorityLabel(job: Job) {
   return job.priority === "Urgent" ? "URGENT - BOOK NOW" : "STANDARD JOB";
 }
 
-type RecommendationOptions = { sameDayRequested?: boolean; plannedRoute?: boolean; deferCommit?: boolean; reloadAfterBooking?: boolean };
+type RecommendationOptions = { sameDayRequested?: boolean; requestedDateKey?: string; plannedRoute?: boolean; deferCommit?: boolean; reloadAfterBooking?: boolean };
 type PendingBookingCommit = { jobId: number; jobUUID: string; techName: string; commit: () => void };
 type BookingResult = { status: "success" | "error"; jobUUID: string; message: string; nonce: number };
 
@@ -398,17 +440,18 @@ function buildRemainingRun(tech: Technician, jobs: Job[], dateKey: string, now: 
     .filter(stop => stop.window.end.getTime() > now.getTime());
 }
 
-function sameDayStandardSlot(tech: Technician, job: Job, jobs: Job[], now = new Date()) {
+function sameDayStandardSlot(tech: Technician, job: Job, jobs: Job[], routeDateKey = sydneyDateKey(), now = new Date()) {
   const requested = customerRequestedWindow(job);
-  const dateKey = sydneyDateKey(now);
+  const dateKey = routeDateKey;
   const windowStart = new Date(`${dateKey}T${String(requested.startHour).padStart(2, "0")}:00:00`);
   const windowEnd = new Date(`${dateKey}T${String(requested.endHour).padStart(2, "0")}:00:00`);
   const dayEnd = windowEnd;
   const durationMinutes = quoteRouteDuration(job);
-  const existing = buildRemainingRun(tech, jobs.filter(item => item.id !== job.id), dateKey, now);
+  const routeNow = dateKey === sydneyDateKey(now) ? now : new Date(`${dateKey}T00:00:00`);
+  const existing = buildRemainingRun(tech, jobs.filter(item => item.id !== job.id), dateKey, routeNow);
   const jobPoint = routePoint(job);
   const travelMinutes = (from: RoutePoint, to: RoutePoint) => Math.max(10, Math.round(routeDistance(from, to) * 1.7));
-  const active = currentBooking(tech.id, jobs, now);
+  const active = dateKey === sydneyDateKey(now) ? currentBooking(tech.id, jobs, now) : null;
   const startPoint = tech.latitude != null && tech.longitude != null
     ? routePoint(tech)
     : active?.job
@@ -434,7 +477,7 @@ function sameDayStandardSlot(tech: Technician, job: Job, jobs: Job[], now = new 
   }> = [];
 
   const activeStopIndex = existing.findIndex(stop =>
-    stop.window.start.getTime() <= now.getTime() && stop.window.end.getTime() > now.getTime()
+    stop.window.start.getTime() <= routeNow.getTime() && stop.window.end.getTime() > routeNow.getTime()
   );
   const firstInsertionIndex = activeStopIndex >= 0 ? activeStopIndex + 1 : 0;
 
@@ -445,7 +488,7 @@ function sameDayStandardSlot(tech: Technician, job: Job, jobs: Job[], now = new 
     const nextPoint = next ? routePoint(next.job) : undefined;
     const previousReady = previous
       ? new Date(previous.window.end.getTime() + 15 * 60000)
-      : new Date(Math.max(windowStart.getTime(), now.getTime()));
+      : new Date(Math.max(windowStart.getTime(), routeNow.getTime()));
     const directTravel = nextPoint ? travelMinutes(previousPoint, nextPoint) : 0;
     const insertedTravel = travelMinutes(previousPoint, jobPoint) + (nextPoint ? travelMinutes(jobPoint, nextPoint) : 0);
     routeInsertions.push({
@@ -517,7 +560,7 @@ function sameDayStandardSlot(tech: Technician, job: Job, jobs: Job[], now = new 
   const previousPoint = last ? routePoint(last.job) : startPoint;
   const previousReady = last
     ? new Date(last.window.end.getTime() + 15 * 60000)
-    : new Date(Math.max(windowStart.getTime(), now.getTime()));
+    : new Date(Math.max(windowStart.getTime(), routeNow.getTime()));
   const start = roundUpToQuarterHour(new Date(previousReady.getTime() + travelMinutes(previousPoint, jobPoint) * 60000));
   const end = new Date(start.getTime() + durationMinutes * 60000);
   if (start.getTime() < windowStart.getTime() || end.getTime() > dayEnd.getTime()) return null;
@@ -528,7 +571,7 @@ function sameDayStandardSlot(tech: Technician, job: Job, jobs: Job[], now = new 
     plannedOrder: existing.length + 1,
     addedTravel: (bestInsertion?.addedTravel ?? travelMinutes(previousPoint, jobPoint)) + 20,
     previousLabel: bestInsertion
-      ? `today after existing run; closest route fit was after ${bestInsertion.previousLabel}${bestInsertion.nextLabel ? ` before ${bestInsertion.nextLabel}` : ""}, but that gap would make later work late`
+      ? `after existing run; closest route fit was after ${bestInsertion.previousLabel}${bestInsertion.nextLabel ? ` before ${bestInsertion.nextLabel}` : ""}, but that gap would make later work late`
       : last ? `job #${last.job.id} (${last.job.suburb})` : "live current location",
     nextLabel: null
   };
@@ -681,12 +724,13 @@ function recommendation(tech: Technician, job: Job, jobs: Job[], options: Recomm
   const missingSkill = enforceCapability && knownSkills && !tech.skills.includes(job.requiredSkill);
   const missingTool = enforceCapability && !!job.requiredTool && knownTools && !tech.tools.includes(job.requiredTool);
   if (missingSkill || missingTool) return { eligible: false, score: 0, eta: 0, reason: missingTool ? `Doesn’t carry ${job.requiredTool}` : `Missing ${job.requiredSkill} skill`, requiresMove: false, moveJob: null as Job | null };
+  const requestedDateKey = options.requestedDateKey || "";
   const sameDayStandard = job.priority !== "Urgent"
-    && (options.sameDayRequested === true || jobDateKey(job) === sydneyDateKey());
-  const routeDateKey = sameDayStandard ? sydneyDateKey() : jobDateKey(job);
+    && (options.sameDayRequested === true || Boolean(requestedDateKey) || jobDateKey(job) === sydneyDateKey());
+  const routeDateKey = requestedDateKey || (sameDayStandard ? sydneyDateKey() : jobDateKey(job));
   const dayJobs = jobs.filter(j => j.techId === tech.id && jobDateKey(j) === routeDateKey);
   const assigned = dayJobs.length;
-  const sameDaySlot = sameDayStandard ? sameDayStandardSlot(tech, job, dayJobs) : null;
+  const sameDaySlot = sameDayStandard ? sameDayStandardSlot(tech, job, dayJobs, routeDateKey) : null;
   const moveJob = null as Job | null;
   const previous = [...dayJobs].sort((a, b) => b.order - a.order)[0];
   const sameDayFrom = tech.latitude != null && tech.longitude != null
@@ -861,8 +905,12 @@ export default function Home() {
               x: existing?.x || 50,
               y: existing?.y || 50,
               latitude: validGps ? latitude : null,
-              longitude: validGps ? longitude : null
-              ,holding: Boolean(person.holding)
+              longitude: validGps ? longitude : null,
+              holding: Boolean(person.holding),
+              roles: normaliseRoles(person.roles ?? existing?.roles, Boolean(person.holding)),
+              workDays: normaliseWorkDays(person.workDays ?? existing?.workDays),
+              shiftStart: String(person.shiftStart || existing?.shiftStart || "07:00"),
+              shiftHours: Math.min(12, Math.max(1, Number(person.shiftHours ?? existing?.shiftHours) || 9))
             } as Technician;
           });
           return mergeSharedSettingsIntoTechs(liveTechs, sharedSettingsRef.current);
@@ -877,8 +925,9 @@ export default function Home() {
     return () => window.removeEventListener("message", receiveServiceM8);
   }, []);
   useEffect(() => { if (loaded) localStorage.setItem(STORAGE, JSON.stringify({ techs, jobs, tools, boardTechIds, centralCoastEnabled })); }, [techs, jobs, tools, boardTechIds, centralCoastEnabled, loaded]);
-  const boardTechs = techs.filter(t => !t.holding && (boardTechIds.length === 0 || boardTechIds.includes(t.id)));
-  const boardJobs = jobs.filter(j => !j.techId || boardTechIds.length === 0 || boardTechIds.includes(j.techId));
+  const boardTechs = techs.filter(t => !t.holding && t.roles.includes("sales"));
+  const boardTechIdSet = new Set(boardTechs.map(tech => tech.id));
+  const boardJobs = jobs.filter(j => !j.techId || boardTechIdSet.has(j.techId));
   const visibleBoardJobs = boardJobs.filter(job => jobDateKey(job) === selectedDate);
   const urgentCount = visibleBoardJobs.filter(j => j.priority === "Urgent").length;
   const assignedCount = boardJobs.filter(j => j.techId).length;
@@ -903,7 +952,7 @@ export default function Home() {
     }
   };
   const buildSharedSettings = (nextTechs = techs, nextTools = tools, nextCentralCoastEnabled = centralCoastEnabled): SharedSettings => normaliseSharedSettings({
-    version: 1,
+    version: 2,
     centralCoastEnabled: nextCentralCoastEnabled,
     tools: nextTools,
     technicianOverrides: nextTechs.map(tech => ({
@@ -916,7 +965,11 @@ export default function Home() {
       color: tech.color,
       x: tech.x,
       y: tech.y,
-      holding: tech.holding
+      holding: tech.holding,
+      roles: tech.roles,
+      workDays: tech.workDays,
+      shiftStart: tech.shiftStart,
+      shiftHours: tech.shiftHours
     }))
   });
   const saveSharedSettings = async (nextTechs: Technician[], nextTools: string[], nextCentralCoastEnabled: boolean, message: string) => {
@@ -1062,14 +1115,16 @@ export default function Home() {
       showToast("Central Coast jobs can only be booked to Joel");
       return null;
     }
+    const requestedDateKey = options.requestedDateKey || "";
     const sameDayRequested = options.sameDayRequested === true
+      || Boolean(requestedDateKey)
       || (job.priority !== "Urgent" && jobDateKey(job) === sydneyDateKey());
-    const routeCheck = recommendation(tech, job, jobs.filter(j => j.id !== job.id), { ...options, sameDayRequested });
+    const routeDateKey = requestedDateKey || (sameDayRequested ? sydneyDateKey() : jobDateKey(job));
+    const routeCheck = recommendation(tech, job, jobs.filter(j => j.id !== job.id), { ...options, sameDayRequested, requestedDateKey: routeDateKey });
     if (sameDayRequested && !routeCheck.eligible) {
       showToast(routeCheck.reason || "No practical same-day route is available");
       return null;
     }
-    const routeDateKey = sameDayRequested ? sydneyDateKey() : jobDateKey(job);
     const sameDay = jobs.filter(j => j.techId === techId && jobDateKey(j) === routeDateKey && j.id !== job.id);
     const sameDayOrder = "plannedOrder" in routeCheck ? routeCheck.plannedOrder : null;
     const order = sameDayRequested && sameDayOrder
@@ -1201,11 +1256,11 @@ export default function Home() {
         const shifted = shiftedActivities.get(j.activityUUID || "");
         return { ...j, order: j.order + 1, scheduledStart: shifted?.startDate || j.scheduledStart, scheduledEnd: shifted?.endDate || j.scheduledEnd };
       }
-      return j.id === job.id ? { ...j, techId, order, duration: bookingDuration, scheduledStart: startDate, scheduledEnd: endDate, routeReason: job.routeReason } : j;
+      return j.id === job.id ? { ...j, techId, order, duration: bookingDuration, scheduledDate: routeDateKey, scheduledStart: startDate, scheduledEnd: endDate, routeReason: job.routeReason } : j;
     }));
     if (!options.deferCommit) commit();
     setReview(null); setPage("Routes");
-    showToast(options.deferCommit ? `Saving job #${job.id} with ${tech.name} in ServiceM8…` : sameDayRequested ? `Same-day job inserted into ${tech.name}’s run at ${timeLabel(start)}.` : respectAllocation ? `Booking job #${job.id} in its ${job.holdingWindow} allocation with ${tech.name}.` : job.priority === "Urgent" ? shiftActivities.length ? `Urgent job sent to ${tech.name}; ${shiftActivities.length} conflicting booking${shiftActivities.length === 1 ? "" : "s"} moved one hour.` : `Urgent job fits on ${tech.name}’s run without moving later bookings.` : `Booking job #${job.id} with ${tech.name} in ServiceM8…`);
+    showToast(options.deferCommit ? `Saving job #${job.id} with ${tech.name} in ServiceM8…` : sameDayRequested ? `Job inserted into ${tech.name}’s ${routeDateKey} run at ${timeLabel(start)}.` : respectAllocation ? `Booking job #${job.id} in its ${job.holdingWindow} allocation with ${tech.name}.` : job.priority === "Urgent" ? shiftActivities.length ? `Urgent job sent to ${tech.name}; ${shiftActivities.length} conflicting booking${shiftActivities.length === 1 ? "" : "s"} moved one hour.` : `Urgent job fits on ${tech.name}’s run without moving later bookings.` : `Booking job #${job.id} with ${tech.name} in ServiceM8…`);
     return { jobId: job.id, jobUUID: String(job.serviceM8UUID || ""), techName: tech.name, commit };
   };
   useEffect(() => {
@@ -1265,10 +1320,11 @@ export default function Home() {
 
   const focusedJobKey = normaliseUUID(focusedJobUUID.current);
   const focusedJobId = focusedJobNumber.current;
+  const focusedJobPool = jobs;
   const jobCardJob = focusedJobKey
-    ? boardJobs.find(job => normaliseUUID(job.serviceM8UUID) === focusedJobKey) || (focusedJobId ? boardJobs.find(job => Number(job.id) === focusedJobId) : null)
+    ? focusedJobPool.find(job => normaliseUUID(job.serviceM8UUID) === focusedJobKey) || (focusedJobId ? focusedJobPool.find(job => Number(job.id) === focusedJobId) : null)
     : focusedJobId
-    ? boardJobs.find(job => Number(job.id) === focusedJobId)
+    ? focusedJobPool.find(job => Number(job.id) === focusedJobId)
     : null;
 
   if (jobCardMode) {
@@ -1348,12 +1404,11 @@ export default function Home() {
         }}
         edit={setEditTech}
         addTech={() => setAddTech(true)}
-        toggleTechActive={tech => {
-          const nextTechs = techs.map(t => t.id === tech.id ? { ...t, holding: !t.holding } : t);
-          const nextBoardIds = nextTechs.filter(t => !t.holding).map(t => t.id);
+        toggleRole={(tech, role) => {
+          const enabled = tech.roles.includes(role);
+          const nextTechs = techs.map(t => t.id === tech.id ? { ...t, roles: enabled ? t.roles.filter(item => item !== role) : [...t.roles, role] } : t);
           setTechs(nextTechs);
-          setBoardTechIds(nextBoardIds);
-          void saveSharedSettings(nextTechs, tools, centralCoastEnabled, `${tech.name} ${tech.holding ? "included in" : "removed from"} Auto Route`);
+          void saveSharedSettings(nextTechs, tools, centralCoastEnabled, `${tech.name} ${enabled ? "removed from" : "added to"} ${role === "sales" ? "Sales Tech" : "Installer"} for everyone`);
         }}
         addTool={tool => {
           const cleaned = tool.trim();
@@ -1376,8 +1431,8 @@ export default function Home() {
     {newJob && <JobForm close={() => setNewJob(false)} create={job => { setJobs(x => [...x, job]); setNewJob(false); setReview(job); }} />}
     {review && <Allocation job={review} jobs={boardJobs} techs={boardTechs} close={() => setReview(null)} assign={assign} />}
     {editTech && <TechnicianForm tech={editTech} tools={tools} close={() => setEditTech(null)} save={tech => { const nextTechs = techs.map(t => t.id === tech.id ? tech : t); setTechs(nextTechs); setEditTech(null); void saveSharedSettings(nextTechs, tools, centralCoastEnabled, `${tech.name}’s truck setup saved for everyone`); }} />}
-    {addTech && <TechnicianForm tools={tools} close={() => setAddTech(false)} save={tech => { const nextTechs = [...techs, tech]; setTechs(nextTechs); setBoardTechIds(ids => ids.length ? [...ids, tech.id] : ids); setAddTech(false); void saveSharedSettings(nextTechs, tools, centralCoastEnabled, `${tech.name} added to shared live board settings`); }} />}
-    {manageBoard && <div className="modal-overlay"><section className="board-modal"><header><div><h2>Select sales technicians</h2><p>Only the technicians switched on here can receive Auto Route bookings.</p></div><button onClick={() => setManageBoard(false)}>×</button></header><div>{techs.filter(t => !t.holding).map(t => { const on = boardTechIds.length === 0 || boardTechIds.includes(t.id); return <button className={on ? "selected" : ""} key={t.id} onClick={() => setBoardTechIds(ids => on ? (ids.length === 0 ? techs.filter(x => !x.holding).map(x => x.id).filter(id => id !== t.id) : ids.filter(id => id !== t.id)) : [...ids, t.id])}><span style={{background:t.color}}>{t.name[0]}</span><div><b>{t.name}</b><small>{jobs.filter(j => j.techId === t.id).length} quote appointments today</small></div><em>{on ? "✓ On board" : "Add"}</em></button>})}</div><footer><button onClick={() => setBoardTechIds(techs.filter(t => !t.holding).map(t => t.id))}>Show all staff</button><button onClick={() => setManageBoard(false)}>Save selection</button></footer></section></div>}
+    {addTech && <TechnicianForm tools={tools} close={() => setAddTech(false)} save={tech => { const nextTechs = [...techs, tech]; setTechs(nextTechs); setAddTech(false); void saveSharedSettings(nextTechs, tools, centralCoastEnabled, `${tech.name} added to shared staff settings`); }} />}
+    {manageBoard && <div className="modal-overlay"><section className="board-modal"><header><div><h2>Shared sales technicians</h2><p>This is the same Sales Tech list used by Auto Route and Same Day AI / Quote for every admin.</p></div><button onClick={() => setManageBoard(false)}>×</button></header><div>{techs.filter(t => !t.holding).map(t => { const on = t.roles.includes("sales"); return <button className={on ? "selected" : ""} key={t.id} onClick={() => { const nextTechs = techs.map(item => item.id === t.id ? { ...item, roles: on ? item.roles.filter(role => role !== "sales") : [...item.roles, "sales" as StaffRole] } : item); setTechs(nextTechs); void saveSharedSettings(nextTechs, tools, centralCoastEnabled, `${t.name} ${on ? "removed from" : "added to"} Sales Tech for everyone`); }}><span style={{background:t.color}}>{t.name[0]}</span><div><b>{t.name}</b><small>{jobs.filter(j => j.techId === t.id).length} quote appointments today</small></div><em>{on ? "✓ Sales Tech" : "Add"}</em></button>})}</div><footer><span>Changes save immediately across all admins.</span><button onClick={() => setManageBoard(false)}>Done</button></footer></section></div>}
     {queueWorkspace && <div className="queue-workspace-overlay" role="dialog" aria-modal="true" aria-label="Booking workspace"><section className="queue-workspace"><header><div><span>BOOKING WORKSPACE</span><h2>Dispatch board & jobs waiting to book</h2><p>Drag jobs onto an allocation lane, or drag an allocated job back into Jobs Waiting to Book.</p></div><button onClick={() => setQueueWorkspace(false)} aria-label="Close booking workspace">×</button></header><ServiceM8DispatchBoard techs={boardTechs} jobs={visibleBoardJobs} waitingJobs={boardJobs} review={setReview} selectedDate={selectedDate} routing={autoRouteQueue.length > 0} routeAllocationWindow={routeAllocationWindow} allocateWaitingJob={allocateWaitingJob} returnWaitingJob={returnWaitingJob} focus /></section></div>}
     <div className="desktop-only">This dashboard is designed for an admin desktop screen. Please open it on a larger display.</div>
   </div>
@@ -1595,7 +1650,7 @@ function RunsPage({ techs, jobs, add, review }: { techs: Technician[]; jobs: Job
   </section>
 }
 
-function Settings({ techs, tools, centralCoastEnabled, settingsUnlocked, settingsPin, settingsStatus, setSettingsPin, unlockSettings, toggleCentralCoast, edit, addTech, toggleTechActive, addTool, removeTool }: {
+function Settings({ techs, tools, centralCoastEnabled, settingsUnlocked, settingsPin, settingsStatus, setSettingsPin, unlockSettings, toggleCentralCoast, edit, addTech, toggleRole, addTool, removeTool }: {
   techs: Technician[];
   tools: string[];
   centralCoastEnabled: boolean;
@@ -1607,7 +1662,7 @@ function Settings({ techs, tools, centralCoastEnabled, settingsUnlocked, setting
   toggleCentralCoast: () => void;
   edit: (t: Technician) => void;
   addTech: () => void;
-  toggleTechActive: (t: Technician) => void;
+  toggleRole: (t: Technician, role: StaffRole) => void;
   addTool: (s: string) => void;
   removeTool: (s: string) => void;
 }) {
@@ -1617,7 +1672,7 @@ function Settings({ techs, tools, centralCoastEnabled, settingsUnlocked, setting
       <section className="settings-lock">
         <small>OWNER SETTINGS</small>
         <h2>Admin PIN required</h2>
-        <p>These settings control every ServiceM8 user who opens Auto Route: technician skills, truck equipment, live-board rules and Central Coast routing.</p>
+        <p>These settings control every ServiceM8 user who opens Auto Route or Same Day AI: sales technicians, installers, skills, truck equipment and routing rules.</p>
         <form onSubmit={event => { event.preventDefault(); void unlockSettings(); }}>
           <input type="password" value={settingsPin} onChange={event => setSettingsPin(event.target.value)} placeholder="Enter admin PIN" autoComplete="off" />
           <button type="submit">Unlock Settings</button>
@@ -1628,6 +1683,8 @@ function Settings({ techs, tools, centralCoastEnabled, settingsUnlocked, setting
         <h2>What this controls</h2>
         <ul>
           <li>Skills and truck tools used for urgent job eligibility.</li>
+          <li>Sales Tech controls Auto Route / Quote across every admin.</li>
+          <li>Installer controls Same Day AI work-order selection.</li>
           <li>Standard same-day jobs rank by whole-day route insertion.</li>
           <li>Central Coast can be switched on or off for every admin.</li>
         </ul>
@@ -1638,15 +1695,15 @@ function Settings({ techs, tools, centralCoastEnabled, settingsUnlocked, setting
   return <div className="settings-grid">
     <section className="settings-main">
       <div className="settings-admin-banner">
-        <div><small>SHARED SETTINGS UNLOCKED</small><b>Changes save to Railway and load for every admin using ServiceM8.</b></div>
+        <div><small>SHARED SETTINGS UNLOCKED</small><b>Changes save once and load in Auto Route and Same Day AI for every admin.</b></div>
         <span>{settingsStatus}</span>
       </div>
       <div className={`service-area-setting ${centralCoastEnabled ? "enabled" : "disabled"}`}>
         <div><small>SERVICE AREA CONTROL</small><h2>Central Coast routing is {centralCoastEnabled ? "ON" : "OFF"}</h2><p>{centralCoastEnabled ? "Central Coast jobs can auto-route under the Joel-only rule." : "Central Coast jobs stay visible but are treated as outside the active service area."}</p></div>
         <button className="area-toggle" role="switch" aria-checked={centralCoastEnabled} onClick={toggleCentralCoast}><span />{centralCoastEnabled ? "ON" : "OFF"}</button>
       </div>
-      <div className="settings-title"><div><h2>ServiceM8 Sales Technicians</h2><p>Imported from ServiceM8. Include only the sales technicians Auto Route / Quote should recommend.</p></div><button onClick={addTech}>＋ Add Technician</button></div>
-      {techs.map(t => <article className={`technician-setting ${t.holding ? "excluded-tech" : ""}`} key={t.id}><span className="setting-avatar" style={{ background: t.color }}>{t.name.slice(0, 2).toUpperCase()}</span><div className="setting-info"><h3>{t.name} {t.holding ? <em className="excluded-label">EXCLUDED</em> : <em className="included-label">AUTO ROUTE</em>}</h3><p>{t.home} · {t.vehicle} · {t.status}</p><small>SKILLS</small><div className="tag-list">{t.skills.length ? t.skills.map(s => <i key={s}>{s}</i>) : <em>No skills configured</em>}</div><small>TOOLS IN TRUCK</small><div className="tag-list tools">{t.tools.length ? t.tools.map(s => <i key={s}>✓ {s}</i>) : <em>No special tools assigned</em>}</div></div><div className="setting-actions"><button className="edit-button" onClick={() => edit(t)}>Edit Technician & Truck</button><button className={t.holding ? "include-button" : "remove-button"} onClick={() => toggleTechActive(t)}>{t.holding ? "Include in Auto Route" : "Remove from Auto Route"}</button></div></article>)}
+      <div className="settings-title"><div><h2>Shared Staff Roles</h2><p>Imported from ServiceM8. Set who sells quotes and who installs approved work orders.</p></div><button onClick={addTech}>＋ Add Staff Member</button></div>
+      {techs.filter(t => !t.holding).map(t => <article className={`technician-setting ${t.roles.length === 0 ? "excluded-tech" : ""}`} key={t.id}><span className="setting-avatar" style={{ background: t.color }}>{t.name.slice(0, 2).toUpperCase()}</span><div className="setting-info"><h3>{t.name} {t.roles.includes("sales") && <em className="included-label">SALES TECH</em>} {t.roles.includes("installer") && <em className="included-label">INSTALLER</em>} {t.roles.length === 0 && <em className="excluded-label">STAFF ONLY</em>}</h3><p>{t.home} · {t.vehicle} · {t.status}</p><small>SKILLS</small><div className="tag-list">{t.skills.length ? t.skills.map(s => <i key={s}>{s}</i>) : <em>No skills configured</em>}</div><small>TOOLS IN TRUCK</small><div className="tag-list tools">{t.tools.length ? t.tools.map(s => <i key={s}>✓ {s}</i>) : <em>No special tools assigned</em>}</div></div><div className="setting-actions"><button className="edit-button" onClick={() => edit(t)}>Edit Skills & Availability</button><button className={t.roles.includes("sales") ? "include-button" : "remove-button"} onClick={() => toggleRole(t, "sales")}>{t.roles.includes("sales") ? "✓ Sales Tech" : "+ Sales Tech"}</button><button className={t.roles.includes("installer") ? "include-button" : "remove-button"} onClick={() => toggleRole(t, "installer")}>{t.roles.includes("installer") ? "✓ Installer" : "+ Installer"}</button></div></article>)}
     </section>
     <aside className="tools-library">
       <h2>Master Tools List</h2>
@@ -1680,16 +1737,24 @@ function JobCardDecision({ job, jobs, techs, mapsKey, connected, syncing, sync, 
   openDashboard: () => void;
   toast: string;
 }) {
+  const todayKey = sydneyDateKey();
+  const tomorrowKey = addSydneyDays(todayKey, 1);
   const [sameDayRequested, setSameDayRequested] = useState(false);
+  const [requestedDateKey, setRequestedDateKey] = useState(todayKey);
   const [reassignMode, setReassignMode] = useState(false);
   const scores = useMemo(() => job
     ? techs
         .filter(tech => !reassignMode || tech.id !== job.techId)
-        .map(tech => ({ tech, ...recommendation(tech, job, jobs.filter(item => item.id !== job.id), { sameDayRequested: sameDayRequested || reassignMode }) }))
+        .map(tech => ({ tech, ...recommendation(tech, job, jobs.filter(item => item.id !== job.id), { sameDayRequested: sameDayRequested || reassignMode, requestedDateKey: sameDayRequested ? requestedDateKey : undefined }) }))
         .sort((a, b) => Number(b.eligible) - Number(a.eligible) || b.score - a.score)
-    : [], [techs, job, jobs, sameDayRequested, reassignMode]);
+    : [], [techs, job, jobs, sameDayRequested, requestedDateKey, reassignMode]);
   const best = sameDayRequested ? scores[0] : scores.find(score => score.eligible);
   const [choice, setChoice] = useState("");
+  const requestedDateLabel = requestedDateKey === todayKey
+    ? "today"
+    : requestedDateKey === tomorrowKey
+    ? "tomorrow"
+    : new Intl.DateTimeFormat("en-AU", { weekday: "short", day: "numeric", month: "short" }).format(new Date(`${requestedDateKey}T12:00:00`));
 
   useEffect(() => {
     if (!choice || !scores.some(score => score.tech.id === choice && (score.eligible || sameDayRequested))) {
@@ -1699,6 +1764,7 @@ function JobCardDecision({ job, jobs, techs, mapsKey, connected, syncing, sync, 
 
   useEffect(() => {
     setSameDayRequested(false);
+    setRequestedDateKey(sydneyDateKey());
     setReassignMode(false);
   }, [job?.id]);
 
@@ -1736,19 +1802,19 @@ function JobCardDecision({ job, jobs, techs, mapsKey, connected, syncing, sync, 
       {outside && <section className="decision-warning"><b>OUTSIDE SYDNEY / CENTRAL COAST</b><p>This job requires manual review and will not be auto-assigned.</p></section>}
       {centralCoast && <section className="decision-coast-rule"><b>CENTRAL COAST — JOEL ONLY</b><p>{joelScore?.eligible ? "Joel is the only technician who can be selected for this job." : "Joel is unavailable or does not meet the job requirements. Manual review is required."}</p></section>}
       {assignedTech && <section className={`decision-booked ${reassignMode ? "reassigning" : ""}`}><span>{reassignMode ? "↔" : "✓"}</span><div><b>{reassignMode ? `Find the closest replacement for ${assignedTech.name}` : `Already booked to ${assignedTech.name}`}</b><p>{reassignMode ? "The delayed technician is excluded. Select the closest available sales technician with a realistic gap." : "If this technician is delayed, Auto Route can safely move the existing ServiceM8 booking to someone closer."}</p></div><button disabled={!job.activityUUID} onClick={() => setReassignMode(value => !value)}>{!job.activityUUID ? "Sync required before moving" : reassignMode ? "Cancel reassignment" : "Technician delayed — find replacement"}</button></section>}
-      {job.priority !== "Urgent" && !assignedTech && <section className={`same-day-request ${sameDayRequested ? "active" : ""}`}><div><small>STANDARD JOB — OPTIONAL SAME-DAY REQUEST</small><b>Did the customer ask to be booked today?</b><p>Analyse each technician’s live location and full remaining run, then insert this job where it adds the least travel and avoids unnecessary backtracking.</p></div><button onClick={() => setSameDayRequested(value => !value)}>{sameDayRequested ? "✓ Customer requested today" : "Customer requested today"}</button></section>}
+      {job.priority !== "Urgent" && !assignedTech && <section className={`same-day-request ${sameDayRequested ? "active" : ""}`}><div><small>STANDARD JOB — REQUESTED DATE INSERTION</small><b>Select the date the customer wants.</b><p>Auto Route scans every sales rep’s run on that date and inserts this job where it creates the best whole-day route, shifting later standard jobs if needed.</p></div><div className="date-request-controls"><input type="date" min={todayKey} value={requestedDateKey} onChange={(event) => { setRequestedDateKey(event.target.value || todayKey); setSameDayRequested(true); }} /><button type="button" onClick={() => { setRequestedDateKey(todayKey); setSameDayRequested(true); }}>Today</button><button type="button" onClick={() => { setRequestedDateKey(tomorrowKey); setSameDayRequested(true); }}>Tomorrow</button><button type="button" onClick={() => setSameDayRequested(value => !value)}>{sameDayRequested ? `✓ Finding best spot ${requestedDateLabel}` : "Find best spot"}</button></div></section>}
 
       <div className="decision-grid">
         <section className="decision-ranking">
-          <header><div><small>RECOMMENDATION</small><h2>{reassignMode ? "Closest replacement technicians" : job.priority === "Urgent" ? "Closest practical technicians" : sameDayRequested ? "Best whole-day insertion" : "Best technicians for this route"}</h2><p>{reassignMode ? `${assignedTech?.name || "The current technician"} is excluded. Ranked by live location and the earliest realistic non-overlapping gap.` : job.priority === "Urgent" ? "Ranked by the closest realistic arrival after checking live location, current-job duration, skills, tools and a non-overlapping gap." : sameDayRequested ? "Ranked by testing the job at every reasonable position in each technician’s remaining run, then choosing the lowest added travel that still works today." : "Ranked using live location, current bookings, skills, tools, travel and daily capacity."}</p></div><span>{sameDayRequested ? scores.length : scores.filter(score => score.eligible).length} eligible</span></header>
+          <header><div><small>RECOMMENDATION</small><h2>{reassignMode ? "Closest replacement technicians" : job.priority === "Urgent" ? "Closest practical technicians" : sameDayRequested ? "Best requested-date insertion" : "Best technicians for this route"}</h2><p>{reassignMode ? `${assignedTech?.name || "The current technician"} is excluded. Ranked by live location and the earliest realistic non-overlapping gap.` : job.priority === "Urgent" ? "Ranked by the closest realistic arrival after checking live location, current-job duration, skills, tools and a non-overlapping gap." : sameDayRequested ? `Ranked by testing the job at every reasonable position in each technician’s ${requestedDateLabel} run, then choosing the lowest added travel inside business hours.` : "Ranked using live location, current bookings, skills, tools, travel and daily capacity."}</p></div><span>{sameDayRequested ? scores.length : scores.filter(score => score.eligible).length} eligible</span></header>
           <div className="decision-requirements">
             <div><small>REQUIRED SKILL</small><b>{job.requiredSkill}</b></div>
             <div><small>REQUIRED TOOL</small><b>{job.requiredTool || "No special tool"}</b></div>
             <div><small>BOOKING DURATION</small><b>{sameDayRequested && serviceStatus(job) === "quote" ? "30 minutes quote" : `${job.duration} minutes`}</b></div>
-            <div><small>BOOKING RULE</small><b>{job.priority === "Urgent" ? "Same day — next realistic slot" : sameDayRequested ? "Customer requested today · whole-day route insertion" : job.holdingWindow || job.bookingDay}</b></div>
+            <div><small>BOOKING RULE</small><b>{job.priority === "Urgent" ? "Same day — next realistic slot" : sameDayRequested ? `Customer requested ${requestedDateLabel} · whole-day route insertion` : job.holdingWindow || job.bookingDay}</b></div>
           </div>
           <div className="decision-tech-list">{scores.map((score, index) => {
-            const routeDateKey = sameDayRequested ? sydneyDateKey() : jobDateKey(job);
+            const routeDateKey = sameDayRequested ? requestedDateKey : jobDateKey(job);
             const dayJobs = jobs.filter(item => item.techId === score.tech.id && item.id !== job.id && jobDateKey(item) === routeDateKey);
             const active = currentBooking(score.tech.id, dayJobs);
             const gpsDistance = score.tech.latitude != null && score.tech.longitude != null && job.latitude != null && job.longitude != null
@@ -1775,7 +1841,7 @@ function JobCardDecision({ job, jobs, techs, mapsKey, connected, syncing, sync, 
       </div>
     </main>
 
-    <footer className="decision-footer"><div>{chosen ? <><small>{reassignMode ? "RECOMMENDED REPLACEMENT" : sameDayRequested ? "BEST SAME-DAY INSERTION" : "SELECTED TECHNICIAN"}</small><b>{chosen.tech.name}</b><span>{chosen.reason}{reassignMode ? " · closest practical route selected" : sameDayRequested ? " · whole-day insertion selected" : ` · estimated ${chosen.eta} minute travel`}</span></> : <><small>NO TECHNICIAN SELECTED</small><b>{reassignMode || sameDayRequested ? "No practical same-day route is available" : "Review the requirements above"}</b></>}</div><button className="decision-secondary" onClick={openDashboard}>View full dispatch board</button><button className="decision-assign" disabled={!choice || outside || (Boolean(assignedTech) && !reassignMode)} onClick={() => assign(job, choice, { sameDayRequested: sameDayRequested || reassignMode })}>{reassignMode && assignedTech ? `Move from ${assignedTech.name} to ${techs.find(tech => tech.id === choice)?.name || "replacement"} in ServiceM8` : assignedTech ? `Booked to ${assignedTech.name}` : choice ? `${sameDayRequested ? "Book same-day with" : "Book with"} ${techs.find(tech => tech.id === choice)?.name || "technician"} in ServiceM8` : "No eligible technician"}</button></footer>
+    <footer className="decision-footer"><div>{chosen ? <><small>{reassignMode ? "RECOMMENDED REPLACEMENT" : sameDayRequested ? "BEST REQUESTED-DATE INSERTION" : "SELECTED TECHNICIAN"}</small><b>{chosen.tech.name}</b><span>{chosen.reason}{reassignMode ? " · closest practical route selected" : sameDayRequested ? ` · ${requestedDateLabel} insertion selected` : ` · estimated ${chosen.eta} minute travel`}</span></> : <><small>NO TECHNICIAN SELECTED</small><b>{reassignMode || sameDayRequested ? `No practical route is available for ${requestedDateLabel}` : "Review the requirements above"}</b></>}</div><button className="decision-secondary" onClick={openDashboard}>View full dispatch board</button><button className="decision-assign" disabled={!choice || outside || (Boolean(assignedTech) && !reassignMode)} onClick={() => assign(job, choice, { sameDayRequested: sameDayRequested || reassignMode, requestedDateKey: sameDayRequested ? requestedDateKey : undefined })}>{reassignMode && assignedTech ? `Move from ${assignedTech.name} to ${techs.find(tech => tech.id === choice)?.name || "replacement"} in ServiceM8` : assignedTech ? `Booked to ${assignedTech.name}` : choice ? `${sameDayRequested ? `Book ${requestedDateLabel} with` : "Book with"} ${techs.find(tech => tech.id === choice)?.name || "technician"} in ServiceM8` : "No eligible technician"}</button></footer>
   </div>;
 }
 
@@ -1791,9 +1857,22 @@ function Allocation({ job, jobs, techs, close, assign }: { job: Job; jobs: Job[]
 }
 
 function TechnicianForm({ tech, tools, close, save }: { tech?: Technician; tools: string[]; close: () => void; save: (t: Technician) => void }) {
-  const [f, setF] = useState<Technician>(tech || { id: `tech-${Date.now()}`, name: "", home: "Merrylands", vehicle: "", status: "Available", skills: [], tools: [], color: "#12b76a", ...HOME.Merrylands });
+  const [f, setF] = useState<Technician>(tech || { id: `tech-${Date.now()}`, name: "", home: "Merrylands", vehicle: "", status: "Available", skills: [], tools: [], color: "#12b76a", roles: ["sales"], workDays: [1, 2, 3, 4, 5], shiftStart: "07:00", shiftHours: 9, ...HOME.Merrylands });
   const toggle = (key: "skills" | "tools", value: string) => setF({ ...f, [key]: f[key].includes(value) ? f[key].filter(x => x !== value) : [...f[key], value] });
-  return <div className="overlay" onMouseDown={close}><form className="tech-modal" onMouseDown={e => e.stopPropagation()} onSubmit={e => { e.preventDefault(); const p = HOME[f.home] || SUBURBS[f.home] || { x: 50, y: 50 }; save({ ...f, ...p }) }}><ModalHeader title={tech ? `Edit ${tech.name}` : "Add Technician"} subtitle="Set their starting point, skills and exact truck equipment." close={close} /><div className="tech-form-grid"><label>Technician name<input required value={f.name} onChange={e => setF({ ...f, name: e.target.value })} /></label><label>Status<select value={f.status} onChange={e => setF({ ...f, status: e.target.value as TechStatus })}><option>Available</option><option>On Site</option><option>Driving</option><option>Off</option></select></label><label>Home base<select value={f.home} onChange={e => setF({ ...f, home: e.target.value })}>{Object.keys(SUBURBS).map(s => <option key={s}>{s}</option>)}</select></label><label>Vehicle<input value={f.vehicle} onChange={e => setF({ ...f, vehicle: e.target.value })} placeholder="Vehicle model or registration" /></label></div><div className="selection-group"><h3>Skills</h3><p>Only select work this technician is qualified and approved to attend.</p><div>{SKILLS.map(s => <button type="button" className={f.skills.includes(s) ? "selected" : ""} onClick={() => toggle("skills", s)} key={s}><span>✓</span>{s}</button>)}</div></div><div className="selection-group"><h3>Specific Tools in This Truck</h3><p>Select the actual equipment currently carried in this technician’s vehicle.</p><div>{tools.map(s => <button type="button" className={f.tools.includes(s) ? "selected" : ""} onClick={() => toggle("tools", s)} key={s}><span>✓</span>{s}</button>)}</div></div><footer><button type="button" onClick={close}>Cancel</button><button>Save Technician & Truck</button></footer></form></div>
+  const toggleRole = (role: StaffRole) => setF({ ...f, roles: f.roles.includes(role) ? f.roles.filter(item => item !== role) : [...f.roles, role] });
+  const toggleDay = (day: number) => {
+    const workDays = normaliseWorkDays(f.workDays);
+    setF({ ...f, workDays: workDays.includes(day) ? workDays.filter(item => item !== day) : [...workDays, day] });
+  };
+  return <div className="overlay" onMouseDown={close}><form className="tech-modal" onMouseDown={e => e.stopPropagation()} onSubmit={e => { e.preventDefault(); const p = HOME[f.home] || SUBURBS[f.home] || { x: 50, y: 50 }; save({ ...f, workDays: normaliseWorkDays(f.workDays), shiftStart: f.shiftStart || "07:00", shiftHours: Math.min(12, Math.max(1, Number(f.shiftHours) || 9)), ...p }) }}>
+    <ModalHeader title={tech ? `Edit ${tech.name}` : "Add Staff Member"} subtitle="One shared profile controls Auto Route quotes and Same Day AI installers." close={close} />
+    <div className="selection-group"><h3>Shared role</h3><p>Sales Tech appears in Auto Route / Quote. Installer appears in approved work-order selection.</p><div><button type="button" className={f.roles.includes("sales") ? "selected" : ""} onClick={() => toggleRole("sales")}><span>✓</span>Sales Technician</button><button type="button" className={f.roles.includes("installer") ? "selected" : ""} onClick={() => toggleRole("installer")}><span>✓</span>Installer</button></div></div>
+    <div className="tech-form-grid"><label>Staff name<input required value={f.name} onChange={e => setF({ ...f, name: e.target.value })} /></label><label>Status<select value={f.status} onChange={e => setF({ ...f, status: e.target.value as TechStatus })}><option>Available</option><option>On Site</option><option>Driving</option><option>Off</option></select></label><label>Home base<select value={f.home} onChange={e => setF({ ...f, home: e.target.value })}>{Object.keys(SUBURBS).map(s => <option key={s}>{s}</option>)}</select></label><label>Vehicle<input value={f.vehicle} onChange={e => setF({ ...f, vehicle: e.target.value })} placeholder="Vehicle model or registration" /></label></div>
+    {f.roles.includes("installer") && <><div className="tech-form-grid"><label>Installer shift start<input type="time" value={f.shiftStart || "07:00"} onChange={e => setF({ ...f, shiftStart: e.target.value })} /></label><label>Installer shift hours<input type="number" min="1" max="12" value={f.shiftHours || 9} onChange={e => setF({ ...f, shiftHours: Number(e.target.value) })} /></label></div><div className="selection-group"><h3>Installer working days</h3><p>Same Day AI only offers availability on these days.</p><div>{WORK_DAYS.map(([day, label]) => <button type="button" className={normaliseWorkDays(f.workDays).includes(day) ? "selected" : ""} onClick={() => toggleDay(day)} key={day}><span>✓</span>{label}</button>)}</div></div></>}
+    <div className="selection-group"><h3>Skills</h3><p>For sales techs these control quote eligibility. For installers they control approved-work matching.</p><div>{SKILLS.map(s => <button type="button" className={f.skills.includes(s) ? "selected" : ""} onClick={() => toggle("skills", s)} key={s}><span>✓</span>{s}</button>)}</div></div>
+    <div className="selection-group"><h3>Specific Tools in This Truck</h3><p>Select the actual equipment currently carried in this staff member’s vehicle.</p><div>{tools.map(s => <button type="button" className={f.tools.includes(s) ? "selected" : ""} onClick={() => toggle("tools", s)} key={s}><span>✓</span>{s}</button>)}</div></div>
+    <footer><button type="button" onClick={close}>Cancel</button><button>Save Shared Staff Profile</button></footer>
+  </form></div>
 }
 
 function ModalHeader({ title, subtitle, close }: { title: string; subtitle: string; close: () => void }) { return <header className="modal-header"><div><h2>{title}</h2><p>{subtitle}</p></div><button type="button" onClick={close}>×</button></header> }
