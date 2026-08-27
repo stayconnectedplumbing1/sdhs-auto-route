@@ -8,7 +8,15 @@ function openDashboard(request: Request) {
       ? `${forwardedProto}://${forwardedHost}`
       : new URL(request.url).origin;
   const dashboardURL = new URL("/?servicem8=1&direct=1", publicOrigin).toString();
-  return Response.redirect(dashboardURL, 303);
+  return new Response(null, {
+    status: 303,
+    headers: {
+      Location: dashboardURL,
+      "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+      Pragma: "no-cache",
+      Expires: "0"
+    }
+  });
 }
 
 // ServiceM8 opens this callback inside its own web container. Navigating the
