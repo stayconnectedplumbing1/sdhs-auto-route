@@ -225,5 +225,29 @@ source = source.replace(
   '    const sameDay = jobs.filter(j => j.techId === techId && jobDateKey(j) === routeDateKey && j.id !== job.id);'
 );
 
+
+replaceOnce(
+  text([
+    '  const focusedJobKey = normaliseUUID(focusedJobUUID.current);',
+    '  const focusedJobId = focusedJobNumber.current;',
+    '  const jobCardJob = focusedJobKey',
+    '    ? boardJobs.find(job => normaliseUUID(job.serviceM8UUID) === focusedJobKey) || (focusedJobId ? boardJobs.find(job => Number(job.id) === focusedJobId) : null)',
+    '    : focusedJobId',
+    '    ? boardJobs.find(job => Number(job.id) === focusedJobId)',
+    '    : null;'
+  ]),
+  text([
+    '  const focusedJobKey = normaliseUUID(focusedJobUUID.current);',
+    '  const focusedJobId = focusedJobNumber.current;',
+    '  const focusedJobPool = jobs;',
+    '  const jobCardJob = focusedJobKey',
+    '    ? focusedJobPool.find(job => normaliseUUID(job.serviceM8UUID) === focusedJobKey) || (focusedJobId ? focusedJobPool.find(job => Number(job.id) === focusedJobId) : null)',
+    '    : focusedJobId',
+    '    ? focusedJobPool.find(job => Number(job.id) === focusedJobId)',
+    '    : null;'
+  ]),
+  "focused job full payload lookup"
+);
+
 fs.writeFileSync(pagePath, source);
 console.log("Applied requested-date Auto Route insertion patch.");
