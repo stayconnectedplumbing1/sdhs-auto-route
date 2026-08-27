@@ -27,6 +27,13 @@ test("live dashboard seeds scheduled job details from the already-loaded active 
   assert.doesNotMatch(liveContext, /fetch\(new URL\("\/api\/settings"/);
 });
 
+test("opens from a shared live-data cache while manual Sync forces fresh ServiceM8 data", () => {
+  assert.match(liveContext, /const LIVE_CACHE_MS = 10 \* 60 \* 1000/);
+  assert.match(liveContext, /"X-Auto-Route-Cache": "HIT"/);
+  assert.match(liveContext, /"X-Auto-Route-Cache": "STALE"/);
+  assert.match(page, /live-context\?refresh=1/);
+});
+
 test("turns ServiceM8 allocation staff bookings back into routable waiting jobs", () => {
   assert.match(liveContext, /function holdingWindowForStaff/);
   assert.match(liveContext, /return "AM 8-11"/);
