@@ -75,6 +75,9 @@ const INITIAL_TECHS: Technician[] = [
 const STORAGE = "sdhs-auto-route-v5";
 const CENTRAL_COAST_SETTING = "sdhs-central-coast-enabled";
 const SETTINGS_API = "/api/settings";
+const SAME_DAY_AI_URL = "https://same-day-ai-live-production.up.railway.app";
+const DIRECT_SESSION_STORAGE = "sdhs_auto_route_direct_session";
+const DIRECT_RETURN_STORAGE = "sdhs_auto_route_return_url";
 const DISPATCH_START_HOUR = 6;
 const DISPATCH_END_HOUR = 18;
 const DISPATCH_MINUTES = (DISPATCH_END_HOUR - DISPATCH_START_HOUR) * 60;
@@ -821,11 +824,17 @@ export default function Home() {
   const [settingsUnlocked, setSettingsUnlocked] = useState(false);
   const [settingsStatus, setSettingsStatus] = useState("Shared settings loading…");
   const sharedSettingsRef = useRef<SharedSettings | null>(null);
+  const directSessionTokenRef = useRef("");
+  const pendingDirectPayloadRef = useRef<any>(null);
+  const standaloneServiceM8Ref = useRef(false);
+  const applyIncomingPayloadRef = useRef<(data: any) => void>(() => {});
+  const [directReturnUrl, setDirectReturnUrl] = useState("");
 
   useEffect(() => {
     try {
       const params = new URLSearchParams(window.location.search);
       setEmbedded(window.self !== window.top || params.get("servicem8") === "1");
+      standaloneServiceM8Ref.current = params.get("servicem8") === "1" && params.get("direct") === "1";
       focusedJobUUID.current = params.get("jobUUID") || params.get("job_uuid");
       setJobCardMode(Boolean(focusedJobUUID.current));
       const requestedPage = params.get("page");
@@ -833,6 +842,24 @@ export default function Home() {
         setPage(requestedPage);
       }
     } catch {}
+    try {
+      const handoff = window.name ? JSON.parse(window.name) : null;
+      if (handoff?.source === "same-day-ai-auto-route-handoff") {
+        window.name = "";
+        directSessionTokenRef.current = String(handoff.sessionToken || "");
+        pendingDirectPayloadRef.current = handoff.payload || null;
+        const returnUrl = String(handoff.returnUrl || "");
+        setDirectReturnUrl(returnUrl);
+        if (directSessionTokenRef.current) sessionStorage.setItem(DIRECT_SESSION_STORAGE, directSessionTokenRef.current);
+        if (returnUrl) sessionStorage.setItem(DIRECT_RETURN_STORAGE, returnUrl);
+      } else {
+        directSessionTokenRef.current = sessionStorage.getItem(DIRECT_SESSION_STORAGE) || "";
+        setDirectReturnUrl(sessionStorage.getItem(DIRECT_RETURN_STORAGE) || "");
+      }
+    } catch {
+      directSessionTokenRef.current = sessionStorage.getItem(DIRECT_SESSION_STORAGE) || "";
+      setDirectReturnUrl(sessionStorage.getItem(DIRECT_RETURN_STORAGE) || "");
+    }
     try {
       const saved = localStorage.getItem(STORAGE);
       if (saved) {
@@ -851,9 +878,7 @@ export default function Home() {
     setLoaded(true);
   }, []);
   useEffect(() => {
-    const receiveServiceM8 = (message: MessageEvent) => {
-      if (message.source !== window.parent) return;
-      const data = message.data;
+    const applyServiceM8Data = (data: any) => {
       if (!data) return;
       if (data.source === "auto-route-booked") {
         setBookingResult({ status: "success", jobUUID: String(data.jobUUID || ""), message: "", nonce: Date.now() });
@@ -920,8 +945,26 @@ export default function Home() {
       setLiveConnected(true);
       setLoaded(true);
     };
+    applyIncomingPayloadRef.current = applyServiceM8Data;
+    const receiveServiceM8 = (message: MessageEvent) => {
+      if (message.source !== window.parent) return;
+      applyServiceM8Data(message.data);
+    };
     window.addEventListener("message", receiveServiceM8);
-    window.parent?.postMessage({ source: "auto-route-ready" }, "*");
+    if (pendingDirectPayloadRef.current) {
+      applyServiceM8Data(pendingDirectPayloadRef.current);
+      pendingDirectPayloadRef.current = null;
+    } else if (standaloneServiceM8Ref.current) {
+      void fetch("/api/servicem8/live-context", { cache: "no-store" })
+        .then(async response => {
+          const data = await response.json().catch(() => ({}));
+          if (!response.ok) throw new Error(data.error || `ServiceM8 sync failed (${response.status})`);
+          applyServiceM8Data(data);
+        })
+        .catch(error => console.error("Direct ServiceM8 launch failed", error));
+    } else if (!directSessionTokenRef.current) {
+      window.parent?.postMessage({ source: "auto-route-ready" }, "*");
+    }
     return () => window.removeEventListener("message", receiveServiceM8);
   }, []);
   useEffect(() => { if (loaded) localStorage.setItem(STORAGE, JSON.stringify({ techs, jobs, tools, boardTechIds, centralCoastEnabled })); }, [techs, jobs, tools, boardTechIds, centralCoastEnabled, loaded]);
@@ -1004,9 +1047,65 @@ export default function Home() {
       showToast("Wrong admin PIN");
     }
   };
+  const refreshDirectServiceM8 = async () => {
+    const token = directSessionTokenRef.current;
+    if (!token) return;
+    const jobUUID = focusedJobUUID.current;
+    const endpoint = jobUUID
+      ? `${SAME_DAY_AI_URL}/api/servicem8/auto-route-context?jobUUID=${encodeURIComponent(jobUUID)}`
+      : `${SAME_DAY_AI_URL}/api/servicem8/auto-route-staff`;
+    const response = await fetch(endpoint, {
+      headers: { "x-sdhs-session": token },
+      cache: "no-store"
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || `ServiceM8 refresh failed (${response.status})`);
+    applyIncomingPayloadRef.current(data);
+  };
+  const refreshStandaloneServiceM8 = async () => {
+    const response = await fetch("/api/servicem8/live-context", { cache: "no-store" });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || `ServiceM8 refresh failed (${response.status})`);
+    applyIncomingPayloadRef.current(data);
+  };
+  const sendBooking = (payload: any) => {
+    const token = directSessionTokenRef.current;
+    if (!token) {
+      window.parent?.postMessage(payload, "*");
+      return;
+    }
+    void (async () => {
+      try {
+        const response = await fetch(`${SAME_DAY_AI_URL}/api/servicem8/auto-route-book`, {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-sdhs-session": token },
+          body: JSON.stringify(payload),
+          cache: "no-store"
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.error || `Booking failed (${response.status})`);
+        setBookingResult({ status: "success", jobUUID: String(data.jobUUID || payload.jobUUID || ""), message: "", nonce: Date.now() });
+        if (payload.reloadAfterBooking !== false) await refreshDirectServiceM8();
+      } catch (error) {
+        setBookingResult({ status: "error", jobUUID: String(payload.jobUUID || ""), message: error instanceof Error ? error.message : "ServiceM8 rejected the booking", nonce: Date.now() });
+      }
+    })();
+  };
   const syncServiceM8 = () => {
     setSyncing(true);
-    window.parent?.postMessage({ source: "auto-route-refresh" }, "*");
+    if (directSessionTokenRef.current) {
+      void refreshDirectServiceM8().catch(error => {
+        showToast(error instanceof Error ? error.message : "ServiceM8 refresh failed");
+        setSyncing(false);
+      });
+    } else if (standaloneServiceM8Ref.current) {
+      void refreshStandaloneServiceM8().catch(error => {
+        showToast(error instanceof Error ? error.message : "ServiceM8 refresh failed");
+        setSyncing(false);
+      });
+    } else {
+      window.parent?.postMessage({ source: "auto-route-refresh" }, "*");
+    }
     window.setTimeout(() => setSyncing(false), 12000);
   };
   const startAutoRouteQueue = (plans: PlannedAllocation[]) => {
@@ -1059,7 +1158,7 @@ export default function Home() {
     const end = new Date(start.getTime() + 30 * 60000);
     const startDate = serviceM8Time(start);
     const endDate = serviceM8Time(end);
-    window.parent?.postMessage({
+    sendBooking({
       source: "auto-route-book",
       jobUUID: job.serviceM8UUID || null,
       staffUUID: holdingTech.id,
@@ -1068,7 +1167,7 @@ export default function Home() {
       activityUUID: job.activityUUID || null,
       allocationUUID: job.allocationUUID || null,
       shiftActivities: []
-    }, "*");
+    });
     setJobs(current => current.map(item => item.id === jobId ? {
       ...item,
       techId: null,
@@ -1245,7 +1344,7 @@ export default function Home() {
     const shiftedActivities = new Map(shiftActivities.map(activity => [activity.activityUUID, activity]));
     const startDate = serviceM8Time(start);
     const endDate = serviceM8Time(end);
-    window.parent?.postMessage({ source: "auto-route-book", jobUUID: job.serviceM8UUID || null, staffUUID: techId, startDate, endDate, activityUUID: job.activityUUID || null, allocationUUID: job.allocationUUID || null, shiftActivities, reloadAfterBooking: options.reloadAfterBooking !== false }, "*");
+    sendBooking({ source: "auto-route-book", jobUUID: job.serviceM8UUID || null, staffUUID: techId, startDate, endDate, activityUUID: job.activityUUID || null, allocationUUID: job.allocationUUID || null, shiftActivities, reloadAfterBooking: options.reloadAfterBooking !== false });
     const commit = () => setJobs(all => all.map(j => {
       if (routeCheck.moveJob && j.id === routeCheck.moveJob.id) return { ...j, bookingDay: "Tomorrow" as BookingDay, order: jobs.filter(x => x.techId === techId && x.bookingDay === "Tomorrow").length + 1 };
       if (sameDayRequested && j.id !== job.id && j.techId === techId && jobDateKey(j) === routeDateKey && Number(j.order || 0) >= order) {
@@ -1367,7 +1466,7 @@ export default function Home() {
     <main className="content">
       <header className="topbar">
         <div><span className="today">{new Intl.DateTimeFormat("en-AU", { weekday: "long", day: "numeric", month: "long" }).format(new Date()).toUpperCase()}</span><h1>{page === "Routes" ? "Auto Route" : page === "Runs" ? "Technician Runs" : page === "Jobs" ? "Today’s Jobs" : "Technicians & Tools"}</h1><p>{page === "Routes" ? "Plan waiting jobs around real bookings, travel time and technician skills." : page === "Runs" ? "View each technician’s complete daily route separately." : page === "Jobs" ? "Review every job added for today." : "Control exactly what each technician can do and carries in their truck."}</p></div>
-        <div className="top-actions">{page === "Routes" && <><button className="sync-button" onClick={syncServiceM8} disabled={syncing}>{syncing ? "Syncing…" : "↻ Sync ServiceM8"}</button><button className="board-button" onClick={() => { if (!settingsUnlocked) { setSettingsPin(""); setPage("Settings"); showToast("Unlock owner Settings to change the shared team"); return; } setManageBoard(true); }}>Manage shared team <b>{boardTechs.length}</b></button></>}{page !== "Settings" && page !== "Routes" ? <button className="add-job" onClick={() => setNewJob(true)}>＋ Add New Job</button> : page === "Settings" && settingsUnlocked ? <button className="add-job" onClick={() => setAddTech(true)}>＋ Add Staff Member</button> : null}</div>
+        <div className="top-actions">{directReturnUrl && <button className="sync-button" onClick={() => window.location.assign(directReturnUrl)}>← Same Day AI</button>}{page === "Routes" && <><button className="sync-button" onClick={syncServiceM8} disabled={syncing}>{syncing ? "Syncing…" : "↻ Sync ServiceM8"}</button><button className="board-button" onClick={() => { if (!settingsUnlocked) { setSettingsPin(""); setPage("Settings"); showToast("Unlock owner Settings to change the shared team"); return; } setManageBoard(true); }}>Manage shared team <b>{boardTechs.length}</b></button></>}{page !== "Settings" && page !== "Routes" ? <button className="add-job" onClick={() => setNewJob(true)}>＋ Add New Job</button> : page === "Settings" && settingsUnlocked ? <button className="add-job" onClick={() => setAddTech(true)}>＋ Add Staff Member</button> : null}</div>
       </header>
       <section className="connection-banner" aria-label="ServiceM8 connection status">
         <span className="connection-icon">S8</span>
