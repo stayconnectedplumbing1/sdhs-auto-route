@@ -35,6 +35,13 @@ function fullName(staff: Row) {
   return `${String(staff.first || "").trim()} ${String(staff.last || "").trim()}`.trim() || String(staff.name || "Technician");
 }
 
+function holdingWindowForStaff(staff: Row | undefined) {
+  const name = fullName(staff || {}).replace(/[.]/g, " ").replace(/\s+/g, " ").trim();
+  if (/8\s*[-–—]\s*11\s*AM/i.test(name)) return "AM 8-11";
+  if (/12\s*[-–—]\s*4\s*PM/i.test(name)) return "PM 12-4";
+  return null;
+}
+
 function cleanList(value: unknown): string[] {
   return Array.isArray(value) ? Array.from(new Set(value.map(item => String(item || "").trim()).filter(Boolean))) : [];
 }
@@ -73,16 +80,16 @@ export async function GET(request: NextRequest) {
     const horizon = addDays(today, 8);
     const activityFilter = encodeURIComponent(`start_date gt '${today} 00:00:00' and start_date lt '${horizon} 00:00:00'`);
     const activeJobFilter = encodeURIComponent("active eq 1");
-    const [activitiesRaw, staffRaw, activeJobsRaw, queuesRaw, settingsResponse] = await Promise.all([
+    const [activitiesRaw, staffRaw, activeJobsRaw, settingsResponse] = await Promise.all([
       sm8<Row[]>(`jobactivity.json?%24filter=${activityFilter}`, token),
       sm8<Row[]>("staff.json", token),
       trySm8<Row[]>(`job.json?%24filter=${activeJobFilter}`, token, []),
-      trySm8<Row[]>("queue.json", token, []),
       fetch(new URL("/api/settings", request.url), { cache: "no-store" }).then(response => response.ok ? response.json() : null).catch(() => null)
     ]);
 
     const activities = activitiesRaw.filter(activity => String(activity.active ?? "1") !== "0" && String(activity.activity_was_scheduled ?? "1") !== "0");
-    const queueNames = new Map(queuesRaw.map(queue => [String(queue.uuid || ""), String(queue.name || queue.queue_name || "")]));
+    const queueNames = new Map<string, string>();
+    const staffByUUID = new Map(staffRaw.map(staff => [String(staff.uuid || ""), staff]));
     const waitingJobs = activeJobsRaw.filter(job => actionRequired(job, queueNames));
     const waitingByUUID = new Map(waitingJobs.map(job => [String(job.uuid || ""), job]));
     const jobUUIDs = Array.from(new Set([
@@ -117,6 +124,7 @@ export async function GET(request: NextRequest) {
       const category = classify(job);
       const start = activity?.start_date ? String(activity.start_date) : undefined;
       const end = activity?.end_date ? String(activity.end_date) : undefined;
+      const holdingWindow = holdingWindowForStaff(staffByUUID.get(String(activity?.staff_uuid || "")));
       const startMs = start ? new Date(start.replace(" ", "T")).getTime() : NaN;
       const endMs = end ? new Date(end.replace(" ", "T")).getTime() : NaN;
       return {
@@ -132,7 +140,7 @@ export async function GET(request: NextRequest) {
         priority: category.priority,
         requiredSkill: category.skill,
         requiredTool: category.tool,
-        techId: activity?.staff_uuid ? String(activity.staff_uuid) : null,
+        techId: holdingWindow ? null : activity?.staff_uuid ? String(activity.staff_uuid) : null,
         order: activity ? activities.filter(item => String(item.staff_uuid || "") === String(activity.staff_uuid || "")).sort((a, b) => String(a.start_date || "").localeCompare(String(b.start_date || ""))).findIndex(item => item.uuid === activity.uuid) + 1 : 0,
         bookingDay: "Today",
         latitude: Number.isFinite(Number(job.lat)) ? Number(job.lat) : null,
@@ -141,9 +149,9 @@ export async function GET(request: NextRequest) {
         scheduledEnd: end,
         activityUUID: activity?.uuid ? String(activity.uuid) : null,
         allocationUUID: null,
-        holdingWindow: null,
-        isActionRequired: actionRequired(job, queueNames) && !activity,
-        queueName: String(job.queue_name || queueNames.get(String(job.queue_uuid || "")) || ""),
+        holdingWindow,
+        isActionRequired: Boolean(holdingWindow) || (actionRequired(job, queueNames) && !activity),
+        queueName: holdingWindow ? "Allocation" : String(job.queue_name || queueNames.get(String(job.queue_uuid || "")) || ""),
         jobStatus: String(job.status || "Quote"),
         scheduledDate: start ? start.slice(0, 10) : today,
         serviceM8UUID: uuid
@@ -151,14 +159,16 @@ export async function GET(request: NextRequest) {
     });
 
     const settings = settingsResponse?.settings || settingsResponse || {};
-    const configured = Array.isArray(settings.technicianOverrides)
-      ? settings.technicianOverrides.filter((tech: Row) => !tech.holding && (!Array.isArray(tech.roles) || tech.roles.includes("sales")))
-      : [];
+    const configuredProfiles: Row[] = Array.isArray(settings.technicianOverrides) ? settings.technicianOverrides : [];
+    const configured = configuredProfiles.filter((tech: Row) => !tech.holding && (!Array.isArray(tech.roles) || tech.roles.includes("sales")));
+    const configuredHolding = configuredProfiles.filter((tech: Row) => tech.holding);
     const activeStaff = staffRaw.filter(staff => String(staff.active ?? "1") !== "0" && String(staff.hide_from_schedule ?? "0") !== "1");
     const scheduledStaff = new Set(activities.map(activity => String(activity.staff_uuid || "")).filter(Boolean));
     const colors = ["#1677ff", "#ef4444", "#7c3aed", "#0f9f6e", "#f59e0b", "#0891b2", "#db2777", "#475569"];
     const normalName = (value: string) => value.toLowerCase().replace(/[^a-z0-9]/g, "");
-    const selected = configured.length ? configured : activeStaff.filter(staff => scheduledStaff.has(String(staff.uuid || "")) && !/^(8\s*[-–]\s*11|12\s*[-–]\s*4)$/i.test(fullName(staff)));
+    const selected = configured.length
+      ? [...configured, ...configuredHolding]
+      : activeStaff.filter(staff => scheduledStaff.has(String(staff.uuid || "")));
     const technicians = selected.map((profile: Row, index: number) => {
       const staff = configured.length
         ? activeStaff.find(item => String(item.uuid || "") === String(profile.id || "") || normalName(fullName(item)) === normalName(String(profile.name || "")))
@@ -176,8 +186,8 @@ export async function GET(request: NextRequest) {
         color: String(profile.color || colors[index % colors.length]),
         x: Number.isFinite(Number(profile.x)) ? Number(profile.x) : 50,
         y: Number.isFinite(Number(profile.y)) ? Number(profile.y) : 50,
-        holding: false,
-        roles: Array.isArray(profile.roles) ? profile.roles : ["sales"],
+        holding: Boolean(profile.holding) || Boolean(holdingWindowForStaff(staff || profile)),
+        roles: Boolean(profile.holding) || Boolean(holdingWindowForStaff(staff || profile)) ? [] : Array.isArray(profile.roles) ? profile.roles : ["sales"],
         workDays: Array.isArray(profile.workDays) ? profile.workDays : [1, 2, 3, 4, 5],
         shiftStart: String(profile.shiftStart || "07:00"),
         shiftHours: Number(profile.shiftHours) || 9

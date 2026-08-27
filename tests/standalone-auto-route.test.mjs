@@ -23,6 +23,14 @@ test("standalone booking validates input and writes scheduled activities with th
 
 test("live dashboard seeds scheduled job details from the already-loaded active jobs", () => {
   assert.match(liveContext, /const jobsByUUID = new Map<string, Row>\(\s*activeJobsRaw/s);
-  assert.match(liveContext, /trySm8<Row\[]>\("queue\.json"/);
-  assert.match(liveContext, /queueNames\.get\(String\(job\.queue_uuid/);
+  assert.match(liveContext, /for \(const \[uuid, job\] of waitingByUUID\)/);
+});
+
+test("turns ServiceM8 allocation staff bookings back into routable waiting jobs", () => {
+  assert.match(liveContext, /function holdingWindowForStaff/);
+  assert.match(liveContext, /return "AM 8-11"/);
+  assert.match(liveContext, /return "PM 12-4"/);
+  assert.match(liveContext, /techId: holdingWindow \? null/);
+  assert.match(liveContext, /holdingWindow,/);
+  assert.match(liveContext, /isActionRequired: Boolean\(holdingWindow\)/);
 });
