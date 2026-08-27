@@ -7,7 +7,7 @@ type Row = Record<string, any>;
 
 async function sm8<T>(path: string, token: string): Promise<T> {
   const response = await fetch(`${API_BASE}/${path}`, {
-    headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
+    headers: { "X-API-Key": token, Accept: "application/json" },
     cache: "no-store"
   });
   if (!response.ok) throw new Error(`ServiceM8 ${path} returned ${response.status}`);

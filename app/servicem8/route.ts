@@ -1,5 +1,13 @@
 function openDashboard(request: Request) {
-  const dashboardURL = new URL("/?servicem8=1&direct=1", request.url).toString();
+  const railwayDomain = String(process.env.RAILWAY_PUBLIC_DOMAIN || "").trim();
+  const forwardedHost = request.headers.get("x-forwarded-host") || request.headers.get("host") || "";
+  const forwardedProto = request.headers.get("x-forwarded-proto") || "https";
+  const publicOrigin = railwayDomain
+    ? `https://${railwayDomain}`
+    : forwardedHost
+      ? `${forwardedProto}://${forwardedHost}`
+      : new URL(request.url).origin;
+  const dashboardURL = new URL("/?servicem8=1&direct=1", publicOrigin).toString();
   return Response.redirect(dashboardURL, 303);
 }
 
