@@ -1,9 +1,12 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
 
 const API_BASE = process.env.SERVICEM8_API_BASE || "https://api.servicem8.com/api_1.0";
 type Row = Record<string, any>;
+const LIVE_CACHE_MS = 10 * 60 * 1000;
+let cachedLiveContext: Row | null = null;
+let cachedLiveContextAt = 0;
 
 async function sm8<T>(path: string, token: string): Promise<T> {
   const response = await fetch(`${API_BASE}/${path}`, {
@@ -71,9 +74,15 @@ function actionRequired(job: Row, queueNames = new Map<string, string>()) {
     || String(job.is_action_required || "") === "1";
 }
 
-export async function GET() {
+export async function GET(request: NextRequest) {
   const token = String(process.env.SERVICEM8_API_KEY || "").trim();
   if (!token) return NextResponse.json({ error: "SERVICEM8_API_KEY is not configured" }, { status: 503 });
+  const forceRefresh = request.nextUrl.searchParams.get("refresh") === "1";
+  if (!forceRefresh && cachedLiveContext && Date.now() - cachedLiveContextAt < LIVE_CACHE_MS) {
+    return NextResponse.json(cachedLiveContext, {
+      headers: { "Cache-Control": "no-store", "X-Auto-Route-Cache": "HIT" }
+    });
+  }
 
   try {
     const today = sydneyDateKey();
@@ -188,16 +197,26 @@ export async function GET() {
       };
     }).filter((staff: Row) => staff.id);
 
-    return NextResponse.json({
+    const payload = {
       source: "servicem8-auto-route",
       jobs,
       technicians,
       focusJobUUID: null,
       focusJobNumber: null,
       syncedAt: new Date().toISOString()
-    }, { headers: { "Cache-Control": "no-store" } });
+    };
+    cachedLiveContext = payload;
+    cachedLiveContextAt = Date.now();
+    return NextResponse.json(payload, {
+      headers: { "Cache-Control": "no-store", "X-Auto-Route-Cache": "MISS" }
+    });
   } catch (error) {
     console.error("Standalone ServiceM8 dashboard sync failed", error);
+    if (cachedLiveContext) {
+      return NextResponse.json(cachedLiveContext, {
+        headers: { "Cache-Control": "no-store", "X-Auto-Route-Cache": "STALE" }
+      });
+    }
     return NextResponse.json({ error: error instanceof Error ? error.message : "Could not load ServiceM8 dashboard" }, { status: 502 });
   }
 }
