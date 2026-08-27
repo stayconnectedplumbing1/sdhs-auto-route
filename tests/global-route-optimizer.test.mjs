@@ -109,3 +109,18 @@ test("keeps fixed bookings outside allocation lanes without breaking the remaini
   assert.equal(result.plans.length, 1);
   assert.ok(result.plans[0].endMinute <= 16 * 60);
 });
+
+test("routes seven AM quotes across two sales techs using 8–11 as an arrival window", () => {
+  const twoTechs = technicians.slice(0, 2);
+  const eligible = twoTechs.map((tech) => tech.id);
+  const morningQuotes = Array.from({ length: 7 }, (_, index) => ({
+    ...job(100 + index, `AM Quote ${index + 1}`, -33.84 + index * .002, 151.1 + index * .002, "AM"),
+    eligibleTechIds: eligible,
+  }));
+  const result = optimiseWholeDayRoutes({ technicians: twoTechs, movableJobs: morningQuotes, maxJobs: 12 });
+
+  assert.deepEqual(result.unassignedJobIds, []);
+  assert.equal(result.plans.length, 7);
+  assert.ok(result.plans.every((plan) => plan.startMinute <= 11 * 60));
+  assert.ok(result.plans.some((plan) => plan.endMinute > 11 * 60));
+});
