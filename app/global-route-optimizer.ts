@@ -130,7 +130,9 @@ function scheduleWindow(
       ? fixedEnd
       : startMinute + Math.max(30, job.durationMinutes);
 
-    const outsideAllocationWindow = !job.fixed && (startMinute < bounds.start || endMinute > bounds.end);
+    // 8–11 and 12–4 are customer arrival windows. The appointment must start
+    // inside the selected window; it may finish after the window closes.
+    const outsideAllocationWindow = !job.fixed && (startMinute < bounds.start || startMinute > bounds.end);
     if (outsideAllocationWindow || startMinute < earliest) return null;
 
     scheduled.push({ job, startMinute, endMinute });
