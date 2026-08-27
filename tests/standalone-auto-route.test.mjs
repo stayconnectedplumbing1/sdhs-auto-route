@@ -34,6 +34,10 @@ test("opens from a shared live-data cache while manual Sync forces fresh Service
   assert.match(page, /live-context\?refresh=1/);
 });
 
+test("shows allocated jobs as waiting rather than booked before Auto Route runs", () => {
+  assert.match(page, /visibleBoardJobs\.filter\(j => Boolean\(j\.techId\)\)\.length/);
+});
+
 test("turns ServiceM8 allocation staff bookings back into routable waiting jobs", () => {
   assert.match(liveContext, /function holdingWindowForStaff/);
   assert.match(liveContext, /return "AM 8-11"/);
