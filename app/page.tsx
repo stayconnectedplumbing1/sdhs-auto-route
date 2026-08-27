@@ -833,9 +833,13 @@ export default function Home() {
   useEffect(() => {
     try {
       const params = new URLSearchParams(window.location.search);
-      setEmbedded(window.self !== window.top || params.get("servicem8") === "1");
-      standaloneServiceM8Ref.current = params.get("servicem8") === "1" && params.get("direct") === "1";
-      focusedJobUUID.current = params.get("jobUUID") || params.get("job_uuid");
+      const requestedJobUUID = params.get("jobUUID") || params.get("job_uuid");
+      const standaloneLaunch = (params.get("servicem8") === "1" && params.get("direct") === "1")
+        || window.location.pathname === "/servicem8"
+        || (/ServiceM8/i.test(navigator.userAgent) && !requestedJobUUID);
+      setEmbedded(window.self !== window.top || params.get("servicem8") === "1" || standaloneLaunch);
+      standaloneServiceM8Ref.current = standaloneLaunch;
+      focusedJobUUID.current = requestedJobUUID;
       setJobCardMode(Boolean(focusedJobUUID.current));
       const requestedPage = params.get("page");
       if (requestedPage === "Settings" || requestedPage === "Runs" || requestedPage === "Jobs" || requestedPage === "Routes") {
