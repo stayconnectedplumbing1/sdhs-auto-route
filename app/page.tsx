@@ -1063,7 +1063,7 @@ export default function Home() {
     applyIncomingPayloadRef.current(data);
   };
   const refreshStandaloneServiceM8 = async () => {
-    const response = await fetch("/api/servicem8/live-context", { cache: "no-store" });
+    const response = await fetch("/api/servicem8/live-context?refresh=1", { cache: "no-store" });
     const data = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(data.error || `ServiceM8 refresh failed (${response.status})`);
     applyIncomingPayloadRef.current(data);
