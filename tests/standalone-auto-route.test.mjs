@@ -5,6 +5,8 @@ import test from "node:test";
 const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
 const liveContext = await readFile(new URL("../app/api/servicem8/live-context/route.ts", import.meta.url), "utf8");
 const standaloneBook = await readFile(new URL("../app/api/servicem8/standalone-book/route.ts", import.meta.url), "utf8");
+const nextConfig = await readFile(new URL("../next.config.ts", import.meta.url), "utf8");
+const serviceM8Launch = await readFile(new URL("../app/servicem8/route.ts", import.meta.url), "utf8");
 
 test("standalone dashboard saves routes without using the Same Day AI bridge", () => {
   assert.match(page, /if \(standaloneServiceM8Ref\.current\)/);
@@ -36,6 +38,17 @@ test("opens from a shared live-data cache while manual Sync forces fresh Service
 
 test("shows allocated jobs as waiting rather than booked before Auto Route runs", () => {
   assert.match(page, /visibleBoardJobs\.filter\(j => Boolean\(j\.techId\)\)\.length/);
+});
+
+test("recognises the ServiceM8 desktop add-on even when its client strips launch parameters", () => {
+  assert.match(page, /\/ServiceM8\/i\.test\(navigator\.userAgent\) && !requestedJobUUID/);
+  assert.match(page, /window\.location\.pathname === "\/servicem8"/);
+});
+
+test("does not let ServiceM8 reuse stale dashboard HTML between deployments", () => {
+  assert.match(nextConfig, /generateEtags: false/);
+  assert.match(nextConfig, /no-store, no-cache, must-revalidate, max-age=0/);
+  assert.match(serviceM8Launch, /"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"/);
 });
 
 test("turns ServiceM8 allocation staff bookings back into routable waiting jobs", () => {
