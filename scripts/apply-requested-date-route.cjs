@@ -180,7 +180,7 @@ replaceOnce(
     '        .map(tech => ({ tech, ...recommendation(tech, job, jobs.filter(item => item.id !== job.id), { sameDayRequested: sameDayRequested || reassignMode, requestedDateKey: sameDayRequested ? requestedDateKey : undefined }) }))',
     '        .sort((a, b) => Number(b.eligible) - Number(a.eligible) || b.score - a.score)',
     '    : [], [techs, job, jobs, sameDayRequested, requestedDateKey, reassignMode]);',
-    '  const best = sameDayRequested ? scores[0] : scores.find(score => score.eligible);',
+    '  const best = scores.find(score => score.eligible);',
     '  const [choice, setChoice] = useState("");',
     '  const requestedDateLabel = requestedDateKey === todayKey',
     '    ? "today"',

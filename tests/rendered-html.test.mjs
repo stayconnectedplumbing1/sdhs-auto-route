@@ -128,10 +128,14 @@ test("waits for a ServiceM8 acknowledgement before advancing the booking queue",
   assert.doesNotMatch(source, /setTimeout\(\(\) => \{\s*const \[plan, \.\.\.remaining\] = autoRouteQueue/);
 });
 
-test("routes standard sales appointments without requiring stored trade skills", async () => {
+test("enforces selected trade skills for standard and urgent appointments", async () => {
   const source = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
-  assert.match(source, /if \(job\.priority !== "Urgent"\) return true/);
-  assert.match(source, /const enforceCapability = job\.priority === "Urgent"/);
+  assert.match(source, /if \(!tech\.skills\.includes\(job\.requiredSkill\)\) return false/);
+  assert.match(source, /const missingSkill = !tech\.skills\.includes\(job\.requiredSkill\)/);
+  assert.match(source, /const enforceTool = job\.priority === "Urgent"/);
+  assert.match(source, /does not have the \$\{job\.requiredSkill\} skill selected/);
+  assert.match(source, /disabled=\{outside \|\| \(Boolean\(assignedTech\) && !reassignMode\) \|\| !score\.eligible\}/);
+  assert.doesNotMatch(source, /if \(job\.priority !== "Urgent"\) return true/);
   assert.match(source, /if \(isCentralCoastJob\(job\) && !isJoel\(tech\)\) return false/);
 });
 

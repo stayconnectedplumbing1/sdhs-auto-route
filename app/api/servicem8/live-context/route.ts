@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { classifyServiceM8Job } from "../../../service-classification";
 
 export const dynamic = "force-dynamic";
 
@@ -47,24 +48,6 @@ function holdingWindowForStaff(staff: Row | undefined) {
 
 function cleanList(value: unknown): string[] {
   return Array.isArray(value) ? Array.from(new Set(value.map(item => String(item || "").trim()).filter(Boolean))) : [];
-}
-
-function classify(job: Row) {
-  const text = [job.job_description, job.work_done_description, job.description, job.category_name, job.queue_name, job.status]
-    .map(value => String(value || "")).join(" ");
-  if (/(?:blocked|blockage|block).{0,28}(?:drain|toilet)|(?:drain|toilet).{0,28}(?:blocked|blockage)/i.test(text)) {
-    return { service: "Blocked drain or toilet", skill: "Blocked Drains", tool: "High-pressure jetter", priority: "Urgent", duration: 90 };
-  }
-  if (/(?:hws|hot\s*water|water\s*heater).{0,45}(?:leak|burst|repair|replace|not\s*working|no\s*hot\s*water|fault)|(?:leak|burst|repair|replace|fault).{0,45}(?:hws|hot\s*water|water\s*heater)/i.test(text)) {
-    return { service: "Hot water replacement or repair", skill: "Hot Water", tool: "Hot water tools", priority: "Urgent", duration: 90 };
-  }
-  if (/burst.{0,24}(?:pipe|water|line)|flood(?:ed|ing)?|water\s+(?:everywhere|pouring|gushing)/i.test(text)) {
-    return { service: "Burst pipe or active flooding", skill: "General Plumbing", tool: "", priority: "Urgent", duration: 90 };
-  }
-  if (/gas.{0,24}leak|leak.{0,24}gas/i.test(text)) return { service: "Gas leak", skill: "Gas", tool: "Gas testing equipment", priority: "Urgent", duration: 90 };
-  if (/regrout|grout/i.test(text)) return { service: "Shower regrout", skill: "Waterproofing", tool: "", priority: "Standard", duration: 180 };
-  if (/roof|gutter/i.test(text)) return { service: "Roof repair", skill: "Roofing", tool: "Roofing equipment", priority: "Standard", duration: 120 };
-  return { service: "General enquiry", skill: "General Plumbing", tool: "", priority: "Standard", duration: 60 };
 }
 
 function actionRequired(job: Row, queueNames = new Map<string, string>()) {
@@ -129,7 +112,7 @@ export async function GET(request: NextRequest) {
     const jobs = jobUUIDs.map((uuid, index) => {
       const job = jobsByUUID.get(uuid) || {};
       const activity = activityByJob.get(uuid);
-      const category = classify(job);
+      const category = classifyServiceM8Job(job);
       const start = activity?.start_date ? String(activity.start_date) : undefined;
       const end = activity?.end_date ? String(activity.end_date) : undefined;
       const holdingWindow = holdingWindowForStaff(staffByUUID.get(String(activity?.staff_uuid || "")));

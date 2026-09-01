@@ -53,7 +53,8 @@ const SERVICES: Record<string, { skill: string; tool: string; duration: number; 
 };
 const EMERGENCY_RULES = [
   { pattern: /(?:blocked|blockage|block).{0,28}(?:drain|toilet)|(?:drain|toilet).{0,28}(?:blocked|blockage)/i, skill: "Blocked Drains", tool: "High-pressure jetter", duration: 90 },
-  { pattern: /(?:\bh\s*w\s*s\b|\bhws\b|hot\s*water|water\s*heater|thermann|rheem|dux).{0,45}(?:leak|leaking|burst|repair|replace|replacement|not\s*working|no\s*hot\s*water|fault|system)|(?:leak|leaking|burst|repair|replace|replacement|not\s*working|fault).{0,45}(?:\bh\s*w\s*s\b|\bhws\b|hot\s*water|water\s*heater|thermann|rheem|dux)/i, skill: "Hot Water", tool: "Hot water tools", duration: 90 },
+  { pattern: /(?:\bh\s*w\s*s\b|\bhws\b|hot\s*water|water\s*heater|thermann|rheem|dux).{0,45}(?:replace|replacement|install|installation|upgrade)|(?:replace|replacement|install|installation|upgrade).{0,45}(?:\bh\s*w\s*s\b|\bhws\b|hot\s*water|water\s*heater|thermann|rheem|dux)/i, skill: "Hot Water Installation", tool: "Hot water tools", duration: 90 },
+  { pattern: /(?:\bh\s*w\s*s\b|\bhws\b|hot\s*water|water\s*heater|thermann|rheem|dux).{0,45}(?:leak|leaking|burst|repair|not\s*working|no\s*hot\s*water|fault|service)|(?:leak|leaking|burst|repair|not\s*working|fault|service).{0,45}(?:\bh\s*w\s*s\b|\bhws\b|hot\s*water|water\s*heater|thermann|rheem|dux)/i, skill: "Hot Water", tool: "Hot water tools", duration: 90 },
   { pattern: /burst.{0,24}(?:pipe|water|line)|(?:pipe|water|line).{0,24}burst|flood(?:ed|ing)?|water\s+(?:everywhere|pouring|gushing|running)|overflow(?:ing)?/i, skill: "General Plumbing", tool: "", duration: 90 },
   { pattern: /gas.{0,24}leak|leak.{0,24}gas/i, skill: "Gas", tool: "Gas testing equipment", duration: 90 }
 ];
@@ -651,12 +652,12 @@ function optimiseWaitingAllocations(dateKey: string, waiting: Job[], technicians
   const eligibleTechnicians = (job: Job) => technicians
     .filter(tech => {
       if (isCentralCoastJob(job) && !isJoel(tech)) return false;
-      // These are sales/quote appointments. Standard jobs must remain routable
-      // even when ServiceM8 has not stored trade skills against a salesperson.
-      // Urgent work still requires both the correct skill and truck equipment.
-      if (job.priority !== "Urgent") return true;
-      return tech.skills.includes(job.requiredSkill)
-        && (!job.requiredTool || tech.tools.includes(job.requiredTool));
+      // The shared skills selected in Settings are a strict eligibility filter
+      // for every job. Existing urgent-job equipment checks remain unchanged.
+      if (!tech.skills.includes(job.requiredSkill)) return false;
+      return job.priority !== "Urgent"
+        || !job.requiredTool
+        || tech.tools.includes(job.requiredTool);
     })
     .map(tech => tech.id);
 
@@ -721,11 +722,10 @@ function optimiseWaitingAllocations(dateKey: string, waiting: Job[], technicians
 function recommendation(tech: Technician, job: Job, jobs: Job[], options: RecommendationOptions = {}) {
   if (isOutsideServiceArea(job)) return { eligible: false, score: 0, eta: 0, reason: "Outside Sydney / Central Coast — manual review required", requiresMove: false, moveJob: null as Job | null };
   if (isCentralCoastJob(job) && !isJoel(tech)) return { eligible: false, score: 0, eta: 0, reason: "Central Coast jobs are assigned to Joel only", requiresMove: false, moveJob: null as Job | null };
-  const enforceCapability = job.priority === "Urgent";
-  const knownSkills = Array.isArray(tech.skills) && tech.skills.length > 0;
+  const enforceTool = job.priority === "Urgent";
   const knownTools = Array.isArray(tech.tools) && tech.tools.length > 0;
-  const missingSkill = enforceCapability && knownSkills && !tech.skills.includes(job.requiredSkill);
-  const missingTool = enforceCapability && !!job.requiredTool && knownTools && !tech.tools.includes(job.requiredTool);
+  const missingSkill = !tech.skills.includes(job.requiredSkill);
+  const missingTool = enforceTool && !!job.requiredTool && knownTools && !tech.tools.includes(job.requiredTool);
   if (missingSkill || missingTool) return { eligible: false, score: 0, eta: 0, reason: missingTool ? `Doesn’t carry ${job.requiredTool}` : `Missing ${job.requiredSkill} skill`, requiresMove: false, moveJob: null as Job | null };
   const requestedDateKey = options.requestedDateKey || "";
   const sameDayStandard = job.priority !== "Urgent"
@@ -1235,6 +1235,10 @@ export default function Home() {
     }
     if (isCentralCoastJob(job) && !isJoel(tech)) {
       showToast("Central Coast jobs can only be booked to Joel");
+      return null;
+    }
+    if (!tech.skills.includes(job.requiredSkill)) {
+      showToast(`${tech.name} does not have the ${job.requiredSkill} skill selected`);
       return null;
     }
     const requestedDateKey = options.requestedDateKey || "";
@@ -1870,7 +1874,7 @@ function JobCardDecision({ job, jobs, techs, mapsKey, connected, syncing, sync, 
         .map(tech => ({ tech, ...recommendation(tech, job, jobs.filter(item => item.id !== job.id), { sameDayRequested: sameDayRequested || reassignMode, requestedDateKey: sameDayRequested ? requestedDateKey : undefined }) }))
         .sort((a, b) => Number(b.eligible) - Number(a.eligible) || b.score - a.score)
     : [], [techs, job, jobs, sameDayRequested, requestedDateKey, reassignMode]);
-  const best = sameDayRequested ? scores[0] : scores.find(score => score.eligible);
+  const best = scores.find(score => score.eligible);
   const [choice, setChoice] = useState("");
   const requestedDateLabel = requestedDateKey === todayKey
     ? "today"
@@ -1879,7 +1883,7 @@ function JobCardDecision({ job, jobs, techs, mapsKey, connected, syncing, sync, 
     : new Intl.DateTimeFormat("en-AU", { weekday: "short", day: "numeric", month: "short" }).format(new Date(`${requestedDateKey}T12:00:00`));
 
   useEffect(() => {
-    if (!choice || !scores.some(score => score.tech.id === choice && (score.eligible || sameDayRequested))) {
+    if (!choice || !scores.some(score => score.tech.id === choice && score.eligible)) {
       setChoice(best?.tech.id || "");
     }
   }, [best?.tech.id, choice, scores, sameDayRequested]);
@@ -1928,7 +1932,7 @@ function JobCardDecision({ job, jobs, techs, mapsKey, connected, syncing, sync, 
 
       <div className="decision-grid">
         <section className="decision-ranking">
-          <header><div><small>RECOMMENDATION</small><h2>{reassignMode ? "Closest replacement technicians" : job.priority === "Urgent" ? "Closest practical technicians" : sameDayRequested ? "Best requested-date insertion" : "Best technicians for this route"}</h2><p>{reassignMode ? `${assignedTech?.name || "The current technician"} is excluded. Ranked by live location and the earliest realistic non-overlapping gap.` : job.priority === "Urgent" ? "Ranked by the closest realistic arrival after checking live location, current-job duration, skills, tools and a non-overlapping gap." : sameDayRequested ? `Ranked by testing the job at every reasonable position in each technician’s ${requestedDateLabel} run, then choosing the lowest added travel inside business hours.` : "Ranked using live location, current bookings, skills, tools, travel and daily capacity."}</p></div><span>{sameDayRequested ? scores.length : scores.filter(score => score.eligible).length} eligible</span></header>
+          <header><div><small>RECOMMENDATION</small><h2>{reassignMode ? "Closest replacement technicians" : job.priority === "Urgent" ? "Closest practical technicians" : sameDayRequested ? "Best requested-date insertion" : "Best technicians for this route"}</h2><p>{reassignMode ? `${assignedTech?.name || "The current technician"} is excluded. Ranked by live location and the earliest realistic non-overlapping gap.` : job.priority === "Urgent" ? "Ranked by the closest realistic arrival after checking live location, current-job duration, skills, tools and a non-overlapping gap." : sameDayRequested ? `Ranked by testing the job at every reasonable position in each technician’s ${requestedDateLabel} run, then choosing the lowest added travel inside business hours.` : "Ranked using live location, current bookings, skills, tools, travel and daily capacity."}</p></div><span>{scores.filter(score => score.eligible).length} eligible</span></header>
           <div className="decision-requirements">
             <div><small>REQUIRED SKILL</small><b>{job.requiredSkill}</b></div>
             <div><small>REQUIRED TOOL</small><b>{job.requiredTool || "No special tool"}</b></div>
@@ -1942,19 +1946,18 @@ function JobCardDecision({ job, jobs, techs, mapsKey, connected, syncing, sync, 
             const gpsDistance = score.tech.latitude != null && score.tech.longitude != null && job.latitude != null && job.longitude != null
               ? liveDistance(score.tech, job, 0)
               : null;
-            const capabilityRequired = job.priority === "Urgent";
-            const knownSkills = Array.isArray(score.tech.skills) && score.tech.skills.length > 0;
+            const toolRequired = job.priority === "Urgent";
             const knownTools = Array.isArray(score.tech.tools) && score.tech.tools.length > 0;
-            const hasSkill = !capabilityRequired || !knownSkills || score.tech.skills.includes(job.requiredSkill);
-            const hasTool = !capabilityRequired || !job.requiredTool || !knownTools || score.tech.tools.includes(job.requiredTool);
-            const skillLabel = capabilityRequired ? (knownSkills ? job.requiredSkill : `${job.requiredSkill} not configured`) : `${job.requiredSkill} quote`;
-            const toolLabel = capabilityRequired ? (job.requiredTool ? (knownTools ? job.requiredTool : `${job.requiredTool} not configured`) : "No special tool") : "Standard quote — tool not required";
-            return <label className={`decision-tech ${choice === score.tech.id ? "selected" : ""} ${(!sameDayRequested && !score.eligible) ? "disabled" : ""}`} key={score.tech.id}>
-              <input type="radio" name="technician" disabled={outside || (Boolean(assignedTech) && !reassignMode) || (!sameDayRequested && !score.eligible)} checked={choice === score.tech.id} onChange={() => setChoice(score.tech.id)} />
+            const hasSkill = score.tech.skills.includes(job.requiredSkill);
+            const hasTool = !toolRequired || !job.requiredTool || !knownTools || score.tech.tools.includes(job.requiredTool);
+            const skillLabel = job.requiredSkill;
+            const toolLabel = toolRequired ? (job.requiredTool ? (knownTools ? job.requiredTool : `${job.requiredTool} not configured`) : "No special tool") : "Standard quote — tool not required";
+            return <label className={`decision-tech ${choice === score.tech.id ? "selected" : ""} ${!score.eligible ? "disabled" : ""}`} key={score.tech.id}>
+              <input type="radio" name="technician" disabled={outside || (Boolean(assignedTech) && !reassignMode) || !score.eligible} checked={choice === score.tech.id} onChange={() => setChoice(score.tech.id)} />
               <span className="decision-rank">{index + 1}</span>
               <span className="decision-avatar" style={{ background: score.tech.color }}>{score.tech.name.slice(0, 1)}</span>
-              <div className="decision-tech-main"><div><h3>{score.tech.name}</h3>{index === 0 && (score.eligible || sameDayRequested) && <em>RECOMMENDED</em>}</div><p>{score.reason}</p><div className="decision-match-tags"><span className={hasSkill ? "pass" : "fail"}>{hasSkill ? "✓" : "×"} {skillLabel}</span><span className={hasTool ? "pass" : "fail"}>{hasTool ? "✓" : "×"} {toolLabel}</span></div></div>
-              <div className="decision-tech-status"><strong>{score.eligible || sameDayRequested ? `${score.eta} min` : "Not eligible"}</strong><small>{gpsDistance == null ? "Route-based estimate" : `${gpsDistance.toFixed(1)} km away`}</small><small>{active?.window ? `On job until ${timeLabel(active.window.end)}` : score.tech.latitude ? "Live location available" : "Location unavailable"}</small><small>{dayJobs.length} jobs booked{sameDayRequested && dayJobs.length >= 6 ? " · same-day overtime allowed" : ""}</small></div>
+              <div className="decision-tech-main"><div><h3>{score.tech.name}</h3>{index === 0 && score.eligible && <em>RECOMMENDED</em>}</div><p>{score.reason}</p><div className="decision-match-tags"><span className={hasSkill ? "pass" : "fail"}>{hasSkill ? "✓" : "×"} {skillLabel}</span><span className={hasTool ? "pass" : "fail"}>{hasTool ? "✓" : "×"} {toolLabel}</span></div></div>
+              <div className="decision-tech-status"><strong>{score.eligible ? `${score.eta} min` : "Not eligible"}</strong><small>{gpsDistance == null ? "Route-based estimate" : `${gpsDistance.toFixed(1)} km away`}</small><small>{active?.window ? `On job until ${timeLabel(active.window.end)}` : score.tech.latitude ? "Live location available" : "Location unavailable"}</small><small>{dayJobs.length} jobs booked{sameDayRequested && dayJobs.length >= 6 ? " · same-day overtime allowed" : ""}</small></div>
             </label>;
           })}</div>
         </section>
