@@ -8,6 +8,12 @@ export type ServiceClassification = {
 
 type ServiceM8JobText = Record<string, unknown>;
 
+type IncomingRoutingJobText = {
+  service?: unknown;
+  issue?: unknown;
+  requiredSkill?: unknown;
+};
+
 function searchableJobText(job: ServiceM8JobText) {
   return [
     job.job_description,
@@ -91,4 +97,20 @@ export function classifyServiceM8Job(job: ServiceM8JobText): ServiceClassificati
   }
 
   return { service: "General enquiry", skill: "General Plumbing", tool: "", priority: "Standard", duration: 60 };
+}
+
+// Same Day AI can hand Auto Route a focused job before that job appears in the
+// live ServiceM8 schedule feed. Those handoffs sometimes contain the generic
+// General Plumbing fallback even when the job description names a specialist
+// service. Only repair generic/missing classifications here: a specific skill
+// selected upstream must remain authoritative.
+export function specialistClassificationFallback(job: IncomingRoutingJobText): ServiceClassification | null {
+  const currentSkill = String(job.requiredSkill || "").trim();
+  if (currentSkill && currentSkill !== "General Plumbing") return null;
+
+  const classification = classifyServiceM8Job({
+    job_description: job.issue,
+    description: job.service
+  });
+  return classification.skill === "General Plumbing" ? null : classification;
 }

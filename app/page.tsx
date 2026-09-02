@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { optimiseWholeDayRoutes, type OptimizerJob } from "./global-route-optimizer";
+import { specialistClassificationFallback } from "./service-classification";
 import "./status-colors.css";
 
 type TechStatus = "Available" | "On Site" | "Driving" | "Off";
@@ -343,12 +344,14 @@ function jobDateKey(job: Job) {
 function normaliseRoutingJob(job: Job): Job {
   const text = `${job.service || ""} ${job.issue || ""}`;
   const emergency = EMERGENCY_RULES.find(rule => rule.pattern.test(text));
+  const specialist = specialistClassificationFallback(job);
   return {
     ...job,
+    service: specialist?.service || job.service,
     priority: emergency ? "Urgent" : job.priority || "Standard",
-    requiredSkill: emergency?.skill || job.requiredSkill || "General Plumbing",
-    requiredTool: emergency?.tool ?? job.requiredTool ?? "",
-    duration: Math.max(30, roundDurationToQuarterMinutes(Number(job.duration) || emergency?.duration || 60))
+    requiredSkill: emergency?.skill || specialist?.skill || job.requiredSkill || "General Plumbing",
+    requiredTool: emergency?.tool ?? specialist?.tool ?? job.requiredTool ?? "",
+    duration: Math.max(30, roundDurationToQuarterMinutes(Number(job.duration) || emergency?.duration || specialist?.duration || 60))
   };
 }
 
