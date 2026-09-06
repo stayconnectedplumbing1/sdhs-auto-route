@@ -35,14 +35,23 @@ const merged = `function mergeSharedSettingsIntoTechs(techs: Technician[], setti
   });
 }`;
 
-source = source.replace(/function mergeSharedSettingsIntoTechs\(techs: Technician\[\], settings: SharedSettings \| null\) \{[\s\S]*?\n\}\n\nfunction distance/, merged + '\n\nfunction distance');
+const mergePattern = /function mergeSharedSettingsIntoTechs\(techs: Technician\[\], settings: SharedSettings \| null\) \{[\s\S]*?\n\}\n\nfunction distance/;
+if (!mergePattern.test(source)) throw new Error('Could not locate shared technician merge function');
+source = source.replace(mergePattern, merged + '\n\nfunction distance');
 
-source = source.replace(/\n\s*<button className=\{page === \"Settings\"[\s\S]*?<\/button>\n\s*<\/nav>/, '\n      </nav>');
-source = source.replace(/\{page === \"Routes\" && <><button className=\"sync-button\" onClick=\{syncServiceM8\} disabled=\{syncing\}>\{syncing \? \"Syncing…\" : \"↻ Sync ServiceM8\"\}<\/button><button className=\"board-button\"[\s\S]*?<\/button><\/>
+const settingsNav = `        <button className={page === "Settings" ? "active" : ""} onClick={() => {
+          setSettingsUnlocked(false);
+          setSettingsPin("");
+          setPage("Settings");
+        }}><span>Settings</span></button>\n`;
+source = source.replace(settingsNav, '');
 
-?/, '{page === "Routes" && <button className="sync-button" onClick={syncServiceM8} disabled={syncing}>{syncing ? "Syncing…" : "↻ Sync ServiceM8"}</button>}');
-source = source.replace(/\n\s*\{manageBoard && <div className=\"modal-overlay\">[\s\S]*?<\/section><\/div>\}/, '');
-source = source.replace(/\n\s*const \[manageBoard, setManageBoard\] = useState\(false\);/, '');
+const oldRouteActions = `{page === "Routes" && <><button className="sync-button" onClick={syncServiceM8} disabled={syncing}>{syncing ? "Syncing…" : "↻ Sync ServiceM8"}</button><button className="board-button" onClick={() => { if (!settingsUnlocked) { setSettingsPin(""); setPage("Settings"); showToast("Unlock owner Settings to change the shared team"); return; } setManageBoard(true); }}>Manage shared team <b>{boardTechs.length}</b></button></>}`;
+const newRouteActions = `{page === "Routes" && <button className="sync-button" onClick={syncServiceM8} disabled={syncing}>{syncing ? "Syncing…" : "↻ Sync ServiceM8"}</button>}`;
+if (!source.includes(newRouteActions)) {
+  if (!source.includes(oldRouteActions)) throw new Error('Could not locate Routes top actions');
+  source = source.replace(oldRouteActions, newRouteActions);
+}
 
 fs.writeFileSync(file, source);
 console.log('Applied central Same Day AI team-only Auto Route cleanup.');
