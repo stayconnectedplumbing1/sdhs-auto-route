@@ -370,13 +370,6 @@ function planningWindowName(job: Job) {
   return start && sydneyHourMinute(start).hour >= 12 ? "PM 12-4" : "AM 8-11";
 }
 
-function isFutureStandardReplanCandidate(job: Job, dateKey: string) {
-  return dateKey > sydneyDateKey()
-    && Boolean(job.techId)
-    && job.priority !== "Urgent"
-    && serviceStatus(job) !== "completed";
-}
-
 function priorityClass(job: Job) {
   return job.priority === "Urgent" ? "priority-urgent" : "priority-standard";
 }
@@ -673,11 +666,13 @@ function optimiseWaitingAllocations(dateKey: string, waiting: Job[], technicians
       id: job.id,
       label: job.suburb || `Job #${job.id}`,
       point: routePoint(job),
-      window: planningWindowName(job) === "AM 8-11" ? "AM" : "PM",
+      window: fixed && startMinute != null
+        ? startMinute < 12 * 60 ? "AM" : "PM"
+        : planningWindowName(job) === "AM 8-11" ? "AM" : "PM",
       priority: priorityRank(job),
       durationMinutes: fixed && startMinute != null && endMinute != null
         ? Math.max(30, endMinute - startMinute)
-        : 30,
+        : fixed ? Math.max(30, job.duration || 30) : 30,
       eligibleTechIds: eligibleTechnicians(job),
       fixed,
       techId: fixed ? job.techId : null,
@@ -1149,8 +1144,10 @@ export default function Home() {
     startAutoRouteQueue(plans);
     if (!plans.length) showToast(`No suitable ${windowName} route fits today`);
   };
+  // Assigned quotes and work orders are commitments, including future days.
+  // Only jobs waiting in the allocation lanes may be moved by whole-day routing.
   const selectedDayRouteCandidates = visibleBoardJobs.filter(job =>
-    (!job.techId && Boolean(job.holdingWindow)) || isFutureStandardReplanCandidate(job, selectedDate)
+    !job.techId && Boolean(job.holdingWindow)
   );
   const autoRouteSelectedDay = () => {
     const candidateIds = new Set(selectedDayRouteCandidates.map(job => job.id));
@@ -1243,6 +1240,31 @@ export default function Home() {
     if (!tech.skills.includes(job.requiredSkill)) {
       showToast(`${tech.name} does not have the ${job.requiredSkill} skill selected`);
       return null;
+    }
+    // Automatic plans already account for both neighbouring bookings and travel.
+    // Save their exact slot without invoking the manual/urgent insertion shifts.
+    if (options.plannedRoute) {
+      if (job.techId || jobs.find(existing => existing.id === job.id)?.techId) {
+        showToast("This job is already assigned. Sync ServiceM8 and route again.");
+        return null;
+      }
+      const start = parseServiceM8Date(job.scheduledStart);
+      const end = parseServiceM8Date(job.scheduledEnd);
+      if (!start || !end || end.getTime() <= start.getTime()) return null;
+      if (job.priority === "Urgent" && job.requiredTool && !tech.tools.includes(job.requiredTool)) return null;
+      const startDate = job.scheduledStart!;
+      const endDate = job.scheduledEnd!;
+      sendBooking({ source: "auto-route-book", jobUUID: job.serviceM8UUID || null, staffUUID: techId, startDate, endDate, activityUUID: job.activityUUID || null, allocationUUID: job.allocationUUID || null, shiftActivities: [], reloadAfterBooking: options.reloadAfterBooking !== false });
+      const commit = () => setJobs(all => all.map(existing => existing.id === job.id ? {
+        ...existing, techId, order: job.plannedOrder || existing.order,
+        duration: (end.getTime() - start.getTime()) / 60000,
+        scheduledDate: jobDateKey(job), scheduledStart: startDate, scheduledEnd: endDate,
+        holdingWindow: null, routeReason: job.routeReason
+      } : existing));
+      if (!options.deferCommit) commit();
+      setReview(null); setPage("Routes");
+      showToast(`Saving job #${job.id} with ${tech.name} in ServiceM8…`);
+      return { jobId: job.id, jobUUID: String(job.serviceM8UUID || ""), techName: tech.name, commit };
     }
     const requestedDateKey = options.requestedDateKey || "";
     const sameDayRequested = options.sameDayRequested === true
@@ -2004,3 +2026,4 @@ function TechnicianForm({ tech, tools, close, save }: { tech?: Technician; tools
 }
 
 function ModalHeader({ title, subtitle, close }: { title: string; subtitle: string; close: () => void }) { return <header className="modal-header"><div><h2>{title}</h2><p>{subtitle}</p></div><button type="button" onClick={close}>×</button></header> }
+
