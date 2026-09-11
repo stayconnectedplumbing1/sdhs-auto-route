@@ -809,6 +809,9 @@ export default function Home() {
   const [queueWorkspace, setQueueWorkspace] = useState(false);
   const [offByDate, setOffByDate] = useState<Record<string, string[]>>({});
   const [availabilitySaving, setAvailabilitySaving] = useState(false);
+  const [availabilityPinOpen, setAvailabilityPinOpen] = useState(false);
+  const [availabilityPin, setAvailabilityPin] = useState("");
+  const availabilityPinResolver = useRef<((pin: string | null) => void) | null>(null);
   const availabilityBusyRef = useRef(false);
   const [planningDay, setPlanningDay] = useState(false);
   const [selectedDate, setSelectedDate] = useState(() => sydneyDateKey());
@@ -1149,6 +1152,18 @@ export default function Home() {
     window.addEventListener("focus", refresh);
     return () => { window.clearInterval(timer); window.removeEventListener("focus", refresh); };
   }, [selectedDate]);
+  const requestAvailabilityPin = () => new Promise<string | null>(resolve => {
+    availabilityPinResolver.current = resolve;
+    setAvailabilityPin("");
+    setAvailabilityPinOpen(true);
+  });
+  const closeAvailabilityPin = (pin: string | null) => {
+    const resolve = availabilityPinResolver.current;
+    availabilityPinResolver.current = null;
+    setAvailabilityPinOpen(false);
+    setAvailabilityPin("");
+    resolve?.(pin);
+  };
   const toggleDayAvailability = async (techId: string) => {
     if (availabilityBusyRef.current || autoRouteQueue.length || planningDay) return;
     availabilityBusyRef.current = true;
@@ -1160,14 +1175,17 @@ export default function Home() {
       const headers: Record<string, string> = { "content-type": "application/json" };
       if (directSessionTokenRef.current) headers["x-sdhs-session"] = directSessionTokenRef.current;
       else {
-        const pin = settingsPin || window.prompt("Enter the owner PIN to change availability") || "";
+        const pin = settingsPin || await requestAvailabilityPin();
         if (!pin) return;
         headers["x-admin-pin"] = pin;
-        setSettingsPin(pin);
       }
       const response = await fetch("/api/availability", { method: "PUT", headers, body: JSON.stringify({ date, techId, off }) });
       const data = await response.json();
-      if (!response.ok || !Array.isArray(data.offTechIds)) throw new Error(data.error || "Availability was not saved.");
+      if (!response.ok || !Array.isArray(data.offTechIds)) {
+        if (response.status === 401) setSettingsPin("");
+        throw new Error(data.error || "Availability was not saved.");
+      }
+      if (headers["x-admin-pin"]) setSettingsPin(headers["x-admin-pin"]);
       setOffByDate(current => ({ ...current, [date]: data.offTechIds }));
       const name = techs.find(tech => tech.id === techId)?.name || "Technician";
       showToast(`${name} ${off ? "is off — existing bookings remain for manual reassignment" : "is available for routing"} on ${date}`);
@@ -1643,6 +1661,26 @@ export default function Home() {
     {review && <Allocation job={review} jobs={boardJobs} techs={boardTechs} close={() => setReview(null)} assign={assign} />}
     {editTech && <TechnicianForm tech={editTech} tools={tools} close={() => setEditTech(null)} save={tech => { const nextTechs = techs.map(t => t.id === tech.id ? tech : t); setTechs(nextTechs); setEditTech(null); void saveSharedSettings(nextTechs, tools, centralCoastEnabled, `${tech.name}’s truck setup saved for everyone`); }} />}
     {addTech && <TechnicianForm tools={tools} close={() => setAddTech(false)} save={tech => { const nextTechs = [...techs, tech]; setTechs(nextTechs); setAddTech(false); void saveSharedSettings(nextTechs, tools, centralCoastEnabled, `${tech.name} added to shared staff settings`); }} />}
+    {availabilityPinOpen && <div className="modal-overlay" style={{ zIndex: 20000 }}>
+      <form role="dialog" aria-modal="true" aria-labelledby="availability-pin-title" style={{ width: 340, maxWidth: "90vw", background: "white", padding: 24, borderRadius: 12, boxShadow: "0 16px 48px #0003" }} onSubmit={event => { event.preventDefault(); if (availabilityPin.trim()) closeAvailabilityPin(availabilityPin.trim()); }} onKeyDown={event => {
+        if (event.key === "Escape") { event.preventDefault(); closeAvailabilityPin(null); }
+        if (event.key === "Tab") {
+          const elements = Array.from(event.currentTarget.querySelectorAll<HTMLElement>("input, button:not(:disabled)"));
+          const first = elements[0]; const last = elements[elements.length - 1];
+          if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+          else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+        }
+      }}>
+        <h2 id="availability-pin-title" style={{ fontSize: 20, marginBottom: 8 }}>Change availability</h2>
+        <p style={{ fontSize: 14, marginBottom: 16 }}>Enter the owner PIN to switch this technician on or off for the selected day.</p>
+        <label htmlFor="availability-pin" style={{ display: "block", fontSize: 14, marginBottom: 6 }}>Owner PIN</label>
+        <input id="availability-pin" type="password" inputMode="numeric" autoFocus autoComplete="off" value={availabilityPin} onChange={event => setAvailabilityPin(event.target.value)} style={{ width: "100%", padding: 10, border: "1px solid #98a2b3", borderRadius: 6, fontSize: 18 }} />
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 12, marginTop: 20 }}>
+          <button type="button" onClick={() => closeAvailabilityPin(null)} style={{ padding: "9px 16px", border: "1px solid #98a2b3", borderRadius: 6 }}>Cancel</button>
+          <button type="submit" disabled={!availabilityPin.trim()} style={{ padding: "9px 16px", background: "#1677ff", color: "white", borderRadius: 6 }}>Continue</button>
+        </div>
+      </form>
+    </div>}
     {manageBoard && <div className="modal-overlay"><section className="board-modal"><header><div><h2>Shared sales technicians</h2><p>This is the same Sales Tech list used by Auto Route and Same Day AI / Quote for every admin.</p></div><button onClick={() => setManageBoard(false)}>×</button></header><div>{techs.filter(t => !t.holding).map(t => { const on = t.roles.includes("sales"); return <button className={on ? "selected" : ""} key={t.id} onClick={() => { const nextTechs = techs.map(item => item.id === t.id ? { ...item, roles: on ? item.roles.filter(role => role !== "sales") : [...item.roles, "sales" as StaffRole] } : item); setTechs(nextTechs); void saveSharedSettings(nextTechs, tools, centralCoastEnabled, `${t.name} ${on ? "removed from" : "added to"} Sales Tech for everyone`); }}><span style={{background:t.color}}>{t.name[0]}</span><div><b>{t.name}</b><small>{jobs.filter(j => j.techId === t.id).length} quote appointments today</small></div><em>{on ? "✓ Sales Tech" : "Add"}</em></button>})}</div><footer><span>Changes save immediately across all admins.</span><button onClick={() => setManageBoard(false)}>Done</button></footer></section></div>}
     {queueWorkspace && <div className="queue-workspace-overlay" role="dialog" aria-modal="true" aria-label="Booking workspace"><section className="queue-workspace"><header><div><span>BOOKING WORKSPACE</span><h2>Dispatch board & jobs waiting to book</h2><p>Drag jobs onto an allocation lane, or drag an allocated job back into Jobs Waiting to Book.</p></div><button onClick={() => setQueueWorkspace(false)} aria-label="Close booking workspace">×</button></header><ServiceM8DispatchBoard techs={boardTechs} jobs={visibleBoardJobs} waitingJobs={boardJobs} review={setReview} selectedDate={selectedDate} offTechIds={offByDate[selectedDate]} availabilitySaving={availabilitySaving || planningDay} toggleAvailability={toggleDayAvailability} routing={autoRouteQueue.length > 0} routeAllocationWindow={routeAllocationWindow} allocateWaitingJob={allocateWaitingJob} returnWaitingJob={returnWaitingJob} focus /></section></div>}
     <div className="desktop-only">This dashboard is designed for an admin desktop screen. Please open it on a larger display.</div>
