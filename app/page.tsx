@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { availableForRouting } from "./technician-availability";
 import { optimiseWholeDayRoutes, type OptimizerJob } from "./global-route-optimizer";
 import { specialistClassificationFallback } from "./service-classification";
 import "./status-colors.css";
@@ -806,6 +807,10 @@ export default function Home() {
   const [syncing, setSyncing] = useState(false);
   const [boardView, setBoardView] = useState<"dispatch" | "map">("dispatch");
   const [queueWorkspace, setQueueWorkspace] = useState(false);
+  const [offByDate, setOffByDate] = useState<Record<string, string[]>>({});
+  const [availabilitySaving, setAvailabilitySaving] = useState(false);
+  const availabilityBusyRef = useRef(false);
+  const [planningDay, setPlanningDay] = useState(false);
   const [selectedDate, setSelectedDate] = useState(() => sydneyDateKey());
   const [autoRouteQueue, setAutoRouteQueue] = useState<PlannedAllocation[]>([]);
   const [activeAutoRoutePlan, setActiveAutoRoutePlan] = useState<PlannedAllocation | null>(null);
@@ -1129,6 +1134,46 @@ export default function Home() {
     }
     window.setTimeout(() => setSyncing(false), 12000);
   };
+  const loadDayAvailability = async (date: string) => {
+    const response = await fetch(`/api/availability?date=${encodeURIComponent(date)}`, { cache: "no-store" });
+    const data = await response.json();
+    if (!response.ok || data.date !== date || !Array.isArray(data.offTechIds)) throw new Error(data.error || "Could not check technician availability. Please retry.");
+    const ids = data.offTechIds.filter((id: unknown): id is string => typeof id === "string");
+    setOffByDate(current => ({ ...current, [date]: ids }));
+    return ids as string[];
+  };
+  useEffect(() => {
+    const refresh = () => { void loadDayAvailability(selectedDate).catch(() => {}); };
+    refresh();
+    const timer = window.setInterval(refresh, 30000);
+    window.addEventListener("focus", refresh);
+    return () => { window.clearInterval(timer); window.removeEventListener("focus", refresh); };
+  }, [selectedDate]);
+  const toggleDayAvailability = async (techId: string) => {
+    if (availabilityBusyRef.current || autoRouteQueue.length || planningDay) return;
+    availabilityBusyRef.current = true;
+    setAvailabilitySaving(true);
+    const date = selectedDate;
+    try {
+      const ids = await loadDayAvailability(date);
+      const off = !ids.includes(techId);
+      const headers: Record<string, string> = { "content-type": "application/json" };
+      if (directSessionTokenRef.current) headers["x-sdhs-session"] = directSessionTokenRef.current;
+      else {
+        const pin = settingsPin || window.prompt("Enter the owner PIN to change availability") || "";
+        if (!pin) return;
+        headers["x-admin-pin"] = pin;
+        setSettingsPin(pin);
+      }
+      const response = await fetch("/api/availability", { method: "PUT", headers, body: JSON.stringify({ date, techId, off }) });
+      const data = await response.json();
+      if (!response.ok || !Array.isArray(data.offTechIds)) throw new Error(data.error || "Availability was not saved.");
+      setOffByDate(current => ({ ...current, [date]: data.offTechIds }));
+      const name = techs.find(tech => tech.id === techId)?.name || "Technician";
+      showToast(`${name} ${off ? "is off — existing bookings remain for manual reassignment" : "is available for routing"} on ${date}`);
+    } catch (error) { showToast(error instanceof Error ? error.message : "Could not save availability"); }
+    finally { availabilityBusyRef.current = false; setAvailabilitySaving(false); }
+  };
   const startAutoRouteQueue = (plans: PlannedAllocation[]) => {
     pendingBookingRef.current = null;
     setActiveAutoRoutePlan(null);
@@ -1138,27 +1183,37 @@ export default function Home() {
     setAutoRouteTotal(plans.length);
     setAutoRouteQueue(plans);
   };
-  const routeAllocationWindow = (windowName: string) => {
-    const waiting = visibleBoardJobs.filter(job => job.holdingWindow === windowName && !job.techId);
-    const plans = optimiseWaitingAllocations(selectedDate, waiting, boardTechs, visibleBoardJobs);
-    startAutoRouteQueue(plans);
-    if (!plans.length) showToast(`No suitable ${windowName} route fits today`);
+  const routeAllocationWindow = async (windowName: string) => {
+    if (availabilityBusyRef.current || autoRouteQueue.length) return;
+    availabilityBusyRef.current = true;
+    setPlanningDay(true);
+    try {
+      const offIds = await loadDayAvailability(selectedDate);
+      const waiting = visibleBoardJobs.filter(job => job.holdingWindow === windowName && !job.techId);
+      const plans = optimiseWaitingAllocations(selectedDate, waiting, availableForRouting(boardTechs, offIds), visibleBoardJobs);
+      startAutoRouteQueue(plans);
+      if (!plans.length) showToast(`No suitable ${windowName} route fits today`);
+    } catch (error) { showToast(error instanceof Error ? error.message : "Could not check availability"); }
+    finally { availabilityBusyRef.current = false; setPlanningDay(false); }
   };
-  // Assigned quotes and work orders are commitments, including future days.
-  // Only jobs waiting in the allocation lanes may be moved by whole-day routing.
+  // Existing assigned jobs remain fixed; route only the allocation lanes.
   const selectedDayRouteCandidates = visibleBoardJobs.filter(job =>
     !job.techId && Boolean(job.holdingWindow)
   );
-  const autoRouteSelectedDay = () => {
-    const candidateIds = new Set(selectedDayRouteCandidates.map(job => job.id));
-    const planningJobs = selectedDayRouteCandidates.map(job => ({
-      ...job,
-      holdingWindow: planningWindowName(job)
-    }));
-    const fixedJobs = visibleBoardJobs.filter(job => !candidateIds.has(job.id));
-    const plans = optimiseWaitingAllocations(selectedDate, planningJobs, boardTechs, fixedJobs);
-    startAutoRouteQueue(plans);
-    if (!plans.length) showToast("No suitable route fits the selected allocation windows");
+  const autoRouteSelectedDay = async () => {
+    if (availabilityBusyRef.current || autoRouteQueue.length) return;
+    availabilityBusyRef.current = true;
+    setPlanningDay(true);
+    try {
+      const offIds = await loadDayAvailability(selectedDate);
+      const candidateIds = new Set(selectedDayRouteCandidates.map(job => job.id));
+      const planningJobs = selectedDayRouteCandidates.map(job => ({ ...job, holdingWindow: planningWindowName(job) }));
+      const fixedJobs = visibleBoardJobs.filter(job => !candidateIds.has(job.id));
+      const plans = optimiseWaitingAllocations(selectedDate, planningJobs, availableForRouting(boardTechs, offIds), fixedJobs);
+      startAutoRouteQueue(plans);
+      if (!plans.length) showToast("No suitable route fits the available technicians and allocation windows");
+    } catch (error) { showToast(error instanceof Error ? error.message : "Could not check availability"); }
+    finally { availabilityBusyRef.current = false; setPlanningDay(false); }
   };
   const allocateWaitingJob = (jobId: number, windowName: string) => {
     const job = jobs.find(item => item.id === jobId);
@@ -1424,14 +1479,19 @@ export default function Home() {
       return;
     }
     setActiveAutoRoutePlan(plan);
-    const pending = assign({ ...routedJob, scheduledStart: plan.startDate, scheduledEnd: plan.endDate, plannedOrder: plan.order, routeReason: plan.reason }, plan.techId, { plannedRoute: true, deferCommit: true, reloadAfterBooking: autoRouteQueue.length === 1 });
-    if (!pending) {
-      setRouteBookingError(`Job #${plan.jobId} could not be sent to ServiceM8.`);
-      setAutoRouteQueue([]);
-      setActiveAutoRoutePlan(null);
-      return;
-    }
-    pendingBookingRef.current = pending;
+    void (async () => {
+      try {
+        const offIds = await loadDayAvailability(String(plan.startDate).slice(0, 10));
+        if (offIds.includes(plan.techId)) throw new Error("Technician is off for this date. Remaining jobs have not been booked; run Auto Route again.");
+        const pending = assign({ ...routedJob, scheduledStart: plan.startDate, scheduledEnd: plan.endDate, plannedOrder: plan.order, routeReason: plan.reason }, plan.techId, { plannedRoute: true, deferCommit: true, reloadAfterBooking: autoRouteQueue.length === 1 });
+        if (!pending) throw new Error(`Job #${plan.jobId} could not be sent to ServiceM8.`);
+        pendingBookingRef.current = pending;
+      } catch (error) {
+        setRouteBookingError(error instanceof Error ? error.message : "Could not check availability");
+        setAutoRouteQueue([]);
+        setActiveAutoRoutePlan(null);
+      }
+    })();
   }, [autoRouteQueue, activeAutoRoutePlan]);
   useEffect(() => {
     if (!bookingResult || !activeAutoRoutePlan) return;
@@ -1530,10 +1590,10 @@ export default function Home() {
         <DatePlanner selectedDate={selectedDate} select={setSelectedDate} live={liveConnected} />
         <div className="dispatch-toolbar">
           <div><button className={boardView === "dispatch" ? "active" : ""} onClick={() => setBoardView("dispatch")}>Dispatch Board</button><button className={boardView === "map" ? "active" : ""} onClick={() => setBoardView("map")}>Live Map</button></div>
-          <div className="day-actions"><p><b>{visibleBoardJobs.filter(j => Boolean(j.techId)).length}</b> booked <span>•</span> <b>{visibleBoardJobs.filter(j => !j.techId).length}</b> waiting <span>•</span> <strong>{urgentCount} urgent</strong></p><button className="queue-workspace-button" onClick={() => setQueueWorkspace(true)}>Open booking workspace</button><button className="auto-route-day" disabled={autoRouteQueue.length > 0 || selectedDayRouteCandidates.length === 0} onClick={autoRouteSelectedDay}>{autoRouteQueue.length ? `Saving ${Math.min(autoRouteCompleted + 1, autoRouteTotal)} of ${autoRouteTotal}…` : "Auto Route This Day"}</button></div>
+          <div className="day-actions"><p><b>{visibleBoardJobs.filter(j => Boolean(j.techId)).length}</b> booked <span>•</span> <b>{visibleBoardJobs.filter(j => !j.techId).length}</b> waiting <span>•</span> <strong>{urgentCount} urgent</strong></p><button className="queue-workspace-button" onClick={() => setQueueWorkspace(true)}>Open booking workspace</button><button className="auto-route-day" disabled={planningDay || availabilitySaving || autoRouteQueue.length > 0 || selectedDayRouteCandidates.length === 0} onClick={autoRouteSelectedDay}>{autoRouteQueue.length ? `Saving ${Math.min(autoRouteCompleted + 1, autoRouteTotal)} of ${autoRouteTotal}…` : "Auto Route This Day"}</button></div>
         </div>
         {routeBookingError && <div className="route-booking-error" role="alert"><div><b>ServiceM8 booking stopped</b><span>{routeBookingError}</span></div><button onClick={() => { setRouteBookingError(""); syncServiceM8(); }}>Sync ServiceM8</button></div>}
-        {boardView === "dispatch" ? <ServiceM8DispatchBoard techs={boardTechs} jobs={visibleBoardJobs} waitingJobs={boardJobs} review={setReview} selectedDate={selectedDate} routing={autoRouteQueue.length > 0} routeAllocationWindow={routeAllocationWindow} allocateWaitingJob={allocateWaitingJob} returnWaitingJob={returnWaitingJob} /> : <div className="dispatch-map"><GoogleRouteMap apiKey={mapsKey} techs={boardTechs} jobs={visibleBoardJobs} review={setReview} /></div>}
+        {boardView === "dispatch" ? <ServiceM8DispatchBoard techs={boardTechs} jobs={visibleBoardJobs} waitingJobs={boardJobs} review={setReview} selectedDate={selectedDate} offTechIds={offByDate[selectedDate]} availabilitySaving={availabilitySaving || planningDay} toggleAvailability={toggleDayAvailability} routing={autoRouteQueue.length > 0} routeAllocationWindow={routeAllocationWindow} allocateWaitingJob={allocateWaitingJob} returnWaitingJob={returnWaitingJob} /> : <div className="dispatch-map"><GoogleRouteMap apiKey={mapsKey} techs={boardTechs} jobs={visibleBoardJobs} review={setReview} /></div>}
       </section>}
 
       {page === "Jobs" && <JobsPage jobs={boardJobs} techs={boardTechs} add={() => setNewJob(true)} review={setReview} remove={id => { setJobs(x => x.filter(j => j.id !== id)); showToast(`Job #${id} removed`) }} />}
@@ -1584,7 +1644,7 @@ export default function Home() {
     {editTech && <TechnicianForm tech={editTech} tools={tools} close={() => setEditTech(null)} save={tech => { const nextTechs = techs.map(t => t.id === tech.id ? tech : t); setTechs(nextTechs); setEditTech(null); void saveSharedSettings(nextTechs, tools, centralCoastEnabled, `${tech.name}’s truck setup saved for everyone`); }} />}
     {addTech && <TechnicianForm tools={tools} close={() => setAddTech(false)} save={tech => { const nextTechs = [...techs, tech]; setTechs(nextTechs); setAddTech(false); void saveSharedSettings(nextTechs, tools, centralCoastEnabled, `${tech.name} added to shared staff settings`); }} />}
     {manageBoard && <div className="modal-overlay"><section className="board-modal"><header><div><h2>Shared sales technicians</h2><p>This is the same Sales Tech list used by Auto Route and Same Day AI / Quote for every admin.</p></div><button onClick={() => setManageBoard(false)}>×</button></header><div>{techs.filter(t => !t.holding).map(t => { const on = t.roles.includes("sales"); return <button className={on ? "selected" : ""} key={t.id} onClick={() => { const nextTechs = techs.map(item => item.id === t.id ? { ...item, roles: on ? item.roles.filter(role => role !== "sales") : [...item.roles, "sales" as StaffRole] } : item); setTechs(nextTechs); void saveSharedSettings(nextTechs, tools, centralCoastEnabled, `${t.name} ${on ? "removed from" : "added to"} Sales Tech for everyone`); }}><span style={{background:t.color}}>{t.name[0]}</span><div><b>{t.name}</b><small>{jobs.filter(j => j.techId === t.id).length} quote appointments today</small></div><em>{on ? "✓ Sales Tech" : "Add"}</em></button>})}</div><footer><span>Changes save immediately across all admins.</span><button onClick={() => setManageBoard(false)}>Done</button></footer></section></div>}
-    {queueWorkspace && <div className="queue-workspace-overlay" role="dialog" aria-modal="true" aria-label="Booking workspace"><section className="queue-workspace"><header><div><span>BOOKING WORKSPACE</span><h2>Dispatch board & jobs waiting to book</h2><p>Drag jobs onto an allocation lane, or drag an allocated job back into Jobs Waiting to Book.</p></div><button onClick={() => setQueueWorkspace(false)} aria-label="Close booking workspace">×</button></header><ServiceM8DispatchBoard techs={boardTechs} jobs={visibleBoardJobs} waitingJobs={boardJobs} review={setReview} selectedDate={selectedDate} routing={autoRouteQueue.length > 0} routeAllocationWindow={routeAllocationWindow} allocateWaitingJob={allocateWaitingJob} returnWaitingJob={returnWaitingJob} focus /></section></div>}
+    {queueWorkspace && <div className="queue-workspace-overlay" role="dialog" aria-modal="true" aria-label="Booking workspace"><section className="queue-workspace"><header><div><span>BOOKING WORKSPACE</span><h2>Dispatch board & jobs waiting to book</h2><p>Drag jobs onto an allocation lane, or drag an allocated job back into Jobs Waiting to Book.</p></div><button onClick={() => setQueueWorkspace(false)} aria-label="Close booking workspace">×</button></header><ServiceM8DispatchBoard techs={boardTechs} jobs={visibleBoardJobs} waitingJobs={boardJobs} review={setReview} selectedDate={selectedDate} offTechIds={offByDate[selectedDate]} availabilitySaving={availabilitySaving || planningDay} toggleAvailability={toggleDayAvailability} routing={autoRouteQueue.length > 0} routeAllocationWindow={routeAllocationWindow} allocateWaitingJob={allocateWaitingJob} returnWaitingJob={returnWaitingJob} focus /></section></div>}
     <div className="desktop-only">This dashboard is designed for an admin desktop screen. Please open it on a larger display.</div>
   </div>
 }
@@ -1607,7 +1667,7 @@ function BookingRules() { return <section className="booking-rules"><article cla
 
 function EmptyDay({ add, techs }: { add: () => void; techs: Technician[] }) { return <section className="empty-dashboard"><article className="empty-route"><div className="empty-visual"><span className="home-dot h1">K</span><span className="home-dot h2">T</span><span className="home-dot h3">R</span><div className="empty-road r1" /><div className="empty-road r2" /></div><div className="empty-copy"><span className="empty-icon">⌖</span><h2>No jobs added yet</h2><p>Start with an empty day. Add your first job and the system will check every technician’s location, skills, truck tools and workload before recommending the best route.</p><button className="add-job" onClick={add}>＋ Add Your First Job</button></div></article><aside className="ready-team"><div className="panel-heading"><div><h2>Technicians Ready</h2><p>Set up in Settings</p></div></div>{techs.map(t => <div className="ready-row" key={t.id}><span style={{ background: t.color }}>{t.name.slice(0, 1)}</span><div><b>{t.name}</b><small>Starts from {t.home}</small></div><em>{t.status}</em></div>)}<button onClick={add}>Add a job to begin routing →</button></aside></section> }
 
-function ServiceM8DispatchBoard({ techs, jobs, waitingJobs, review, selectedDate, routing = false, routeAllocationWindow, allocateWaitingJob, returnWaitingJob, focus = false }: { techs: Technician[]; jobs: Job[]; waitingJobs?: Job[]; review: (job: Job) => void; selectedDate?: string; routing?: boolean; routeAllocationWindow?: (windowName: string) => void; allocateWaitingJob?: (jobId: number, windowName: string) => void; returnWaitingJob?: (jobId: number) => void; focus?: boolean }) {
+function ServiceM8DispatchBoard({ offTechIds, availabilitySaving = false, toggleAvailability, techs, jobs, waitingJobs, review, selectedDate, routing = false, routeAllocationWindow, allocateWaitingJob, returnWaitingJob, focus = false }: { offTechIds?: string[]; availabilitySaving?: boolean; toggleAvailability?: (techId: string) => void; techs: Technician[]; jobs: Job[]; waitingJobs?: Job[]; review: (job: Job) => void; selectedDate?: string; routing?: boolean; routeAllocationWindow?: (windowName: string) => void; allocateWaitingJob?: (jobId: number, windowName: string) => void; returnWaitingJob?: (jobId: number) => void; focus?: boolean }) {
   const [draggedJobId, setDraggedJobId] = useState<number | null>(null);
   const [dropWindow, setDropWindow] = useState<string | null>(null);
   const waiting = (waitingJobs || jobs).filter(isActionRequiredJob).sort((a, b) => Number(b.priority === "Urgent") - Number(a.priority === "Urgent") || Number(serviceStatus(a) === "work-order") - Number(serviceStatus(b) === "work-order"));
@@ -1658,10 +1718,11 @@ function ServiceM8DispatchBoard({ techs, jobs, waitingJobs, review, selectedDate
       <HoldingLane label="8 – 11 AM" window="AM 8-11" />
       <HoldingLane label="12 – 4 PM" window="PM 12-4" />
       {techs.map(tech => {
+        const off = offTechIds?.includes(tech.id) === true;
         const techJobs = jobs.filter(job => job.techId === tech.id);
         const layout = layoutTechnicianJobs(techJobs);
         const stacked = layout.laneCount > 1;
-        return <div className={`dispatch-row ${stacked ? "stacked-row" : ""}`} style={{ height: stacked ? `${layout.laneCount * 62 + 6}px` : undefined }} key={tech.id}><div className="staff-cell"><span style={{ background: tech.color }}>{tech.name.slice(0, 1)}</span><div><b>{tech.name}</b><small>{tech.latitude ? "● Live location" : "Location unavailable"} · {techJobs.length}/6 jobs</small></div></div><div className="timeline-cell">{layout.cards.map(({ job, lane }) => { const statusClass = `status-${serviceStatus(job)}`; const outside = isOutsideServiceArea(job); return <button key={job.id} className={`schedule-card ${stacked ? "stacked-card" : ""} ${statusClass} ${priorityClass(job)} ${outside ? "outside-area" : ""}`} style={{ left: `${position(job.scheduledStart)}%`, width: `${width(job)}%`, top: stacked ? `${5 + lane * 62}px` : undefined }} onClick={() => review(job)}><b>{job.scheduledStart ? String(job.scheduledStart).slice(11, 16) : "Quote"} · #{job.id}</b><small>{job.customer}</small><em>{job.suburb}</em>{outside && <i>OUTSIDE AREA</i>}<span className="priority-strip" aria-hidden="true" /></button>; })}</div></div>;
+        return <div className={`dispatch-row ${stacked ? "stacked-row" : ""}`} style={{ height: stacked ? `${layout.laneCount * 62 + 6}px` : undefined }} key={tech.id}><div className="staff-cell"><span style={{ background: tech.color }}>{tech.name.slice(0, 1)}</span><div><b>{tech.name}</b><small>{tech.latitude ? "● Live location" : "Location unavailable"} · {techJobs.length}/6 jobs</small>{toggleAvailability && <button type="button" className={`tech-availability ${off ? "tech-off" : "tech-on"}`} aria-label={`${tech.name}: ${off ? "off" : "available"} on ${selectedDate}. Click to switch.`} aria-pressed={off} disabled={routing || availabilitySaving} onClick={() => toggleAvailability(tech.id)} title={off ? "Switch on for this date" : "Switch off for this date"}>{offTechIds === undefined ? "Check availability" : off ? "Off this day" : "Available"}</button>}</div></div><div className="timeline-cell">{layout.cards.map(({ job, lane }) => { const statusClass = `status-${serviceStatus(job)}`; const outside = isOutsideServiceArea(job); return <button key={job.id} className={`schedule-card ${stacked ? "stacked-card" : ""} ${statusClass} ${priorityClass(job)} ${outside ? "outside-area" : ""}`} style={{ left: `${position(job.scheduledStart)}%`, width: `${width(job)}%`, top: stacked ? `${5 + lane * 62}px` : undefined }} onClick={() => review(job)}><b>{job.scheduledStart ? String(job.scheduledStart).slice(11, 16) : "Quote"} · #{job.id}</b><small>{job.customer}</small><em>{job.suburb}</em>{outside && <i>OUTSIDE AREA</i>}<span className="priority-strip" aria-hidden="true" /></button>; })}</div></div>;
       })}
     </div>
     <aside className={`waiting-panel ${draggedJobId !== null ? "waiting-drop-ready" : ""}`}

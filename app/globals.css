@@ -95,3 +95,6 @@ html,body{font-family:var(--font-sans);-webkit-font-smoothing:antialiased}
 }
 .area-toggle{box-shadow:0 6px 14px -4px rgba(18,163,109,.4)}
 .service-area-setting.disabled .area-toggle{box-shadow:0 6px 14px -4px rgba(217,45,56,.4)}
+.staff-cell .tech-availability { display: block; margin-top: 5px; padding: 4px 8px; border: 1px solid #a7d7bb; border-radius: 5px; background: #eefbf3; color: #166534; font-size: 12px; font-weight: 700; cursor: pointer; line-height: 1.2; }
+.staff-cell .tech-availability.tech-off { border-color: #f3b8b8; background: #fff1f1; color: #b42318; }
+.staff-cell .tech-availability:disabled { opacity: .6; cursor: wait; }
