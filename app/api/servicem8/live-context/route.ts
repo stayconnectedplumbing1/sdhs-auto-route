@@ -1,9 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
-import { classifyServiceM8Job } from "../../../service-classification";
+import { classifyServiceM8Job, type CustomSkillRule } from "../../../service-classification";
 
 export const dynamic = "force-dynamic";
 
 const API_BASE = process.env.SERVICEM8_API_BASE || "https://api.servicem8.com/api_1.0";
+const SETTINGS_STORE_URL = String(process.env.AUTO_ROUTE_SETTINGS_STORE_URL || "").trim();
+const SETTINGS_STORE_TOKEN = String(process.env.AUTO_ROUTE_SETTINGS_TOKEN || "").trim();
 type Row = Record<string, any>;
 const LIVE_CACHE_MS = 10 * 60 * 1000;
 let cachedLiveContext: Row | null = null;
@@ -21,6 +23,31 @@ async function sm8<T>(path: string, token: string): Promise<T> {
 async function trySm8<T>(path: string, token: string, fallback: T): Promise<T> {
   try { return await sm8<T>(path, token); }
   catch { return fallback; }
+}
+
+async function loadCustomSkillRules(): Promise<CustomSkillRule[]> {
+  if (!SETTINGS_STORE_URL || !SETTINGS_STORE_TOKEN) return [];
+  try {
+    const response = await fetch(SETTINGS_STORE_URL, {
+      headers: { authorization: `Bearer ${SETTINGS_STORE_TOKEN}` },
+      cache: "no-store"
+    });
+    if (!response.ok) return [];
+    const body = await response.json().catch(() => ({}));
+    const values = body?.settings?.customSkillRules ?? body?.customSkillRules;
+    if (!Array.isArray(values)) return [];
+    return values.map((value: unknown) => {
+      const rule = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+      return {
+        skill: String(rule.skill || "").trim(),
+        keywords: Array.isArray(rule.keywords) ? Array.from(new Set(rule.keywords.map(item => String(item || "").trim()).filter(Boolean))) : [],
+        enabled: rule.enabled !== false,
+        tool: String(rule.tool || "").trim(),
+      };
+    }).filter((rule: CustomSkillRule) => rule.skill && rule.keywords.length);
+  } catch {
+    return [];
+  }
 }
 
 function sydneyDateKey(date = new Date()) {
@@ -72,10 +99,11 @@ export async function GET(request: NextRequest) {
     const horizon = addDays(today, 8);
     const activityFilter = encodeURIComponent(`start_date gt '${today} 00:00:00' and start_date lt '${horizon} 00:00:00'`);
     const activeJobFilter = encodeURIComponent("active eq 1");
-    const [activitiesRaw, staffRaw, activeJobsRaw] = await Promise.all([
+    const [activitiesRaw, staffRaw, activeJobsRaw, customSkillRules] = await Promise.all([
       sm8<Row[]>(`jobactivity.json?%24filter=${activityFilter}`, token),
       sm8<Row[]>("staff.json", token),
-      trySm8<Row[]>(`job.json?%24filter=${activeJobFilter}`, token, [])
+      trySm8<Row[]>(`job.json?%24filter=${activeJobFilter}`, token, []),
+      loadCustomSkillRules()
     ]);
 
     const activities = activitiesRaw.filter(activity => String(activity.active ?? "1") !== "0" && String(activity.activity_was_scheduled ?? "1") !== "0");
@@ -112,7 +140,7 @@ export async function GET(request: NextRequest) {
     const jobs = jobUUIDs.map((uuid, index) => {
       const job = jobsByUUID.get(uuid) || {};
       const activity = activityByJob.get(uuid);
-      const category = classifyServiceM8Job(job);
+      const category = classifyServiceM8Job(job, customSkillRules);
       const start = activity?.start_date ? String(activity.start_date) : undefined;
       const end = activity?.end_date ? String(activity.end_date) : undefined;
       const holdingWindow = holdingWindowForStaff(staffByUUID.get(String(activity?.staff_uuid || "")));
@@ -186,6 +214,7 @@ export async function GET(request: NextRequest) {
       technicians,
       focusJobUUID: null,
       focusJobNumber: null,
+      customSkillRuleCount: customSkillRules.length,
       syncedAt: new Date().toISOString()
     };
     cachedLiveContext = payload;
