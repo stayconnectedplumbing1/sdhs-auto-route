@@ -747,6 +747,9 @@ function recommendation(tech: Technician, job: Job, jobs: Job[], options: Recomm
   const travelMinutes = Math.max(12, Math.round(10 + travel * 1.7));
   const activeBooking = job.priority === "Urgent" || sameDayStandard ? currentBooking(tech.id, dayJobs) : null;
   const remainingMinutes = activeBooking?.window ? Math.max(0, Math.ceil((activeBooking.window.end.getTime() - Date.now()) / 60000)) : 0;
+  if (sameDayStandard && !sameDaySlot) {
+    return { eligible: false, score: 0, eta: remainingMinutes + travelMinutes, reason: `Whole-day route checked · no feasible time slot within business hours · ${assigned} job${assigned === 1 ? "" : "s"} already booked`, requiresMove: false, moveJob: null as Job | null };
+  }
   if (job.priority === "Urgent" && remainingMinutes > 60) {
     return { eligible: false, score: 0, eta: remainingMinutes + travelMinutes, reason: `Busy on job #${activeBooking?.job.id} until ${timeLabel(activeBooking!.window!.end)}`, requiresMove: false, moveJob: null as Job | null };
   }
