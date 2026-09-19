@@ -348,9 +348,18 @@ export function optimiseWholeDayRoutes(input: {
   fixedJobs?: OptimizerJob[];
   maxJobs?: number;
 }): OptimizerResult {
-  const technicians = input.technicians;
   const maxJobs = input.maxJobs || 6;
-  let routes = createInitialRoutes(technicians, input.fixedJobs || []);
+  let routes = createInitialRoutes(input.technicians, input.fixedJobs || []);
+  // Existing bookings are immutable. A run that is already infeasible must
+  // not make every insertion on the other technicians fail. Leave that run
+  // untouched and assess new work only on runs that pass the existing rules.
+  const technicians = input.technicians.filter(tech =>
+    assessRoutes(routes, [tech], maxJobs).feasible
+  );
+  const fixedCounts = Object.fromEntries(input.technicians.map(tech => {
+    const route = routes.get(tech.id)!;
+    return [tech.id, route.AM.length + route.PM.length];
+  }));
   const unassignedJobIds: number[] = [];
   const pending = [...input.movableJobs].sort((a, b) =>
     a.eligibleTechIds.length - b.eligibleTechIds.length
@@ -405,7 +414,7 @@ export function optimiseWholeDayRoutes(input: {
   return {
     plans,
     unassignedJobIds,
-    counts: assessment.counts,
+    counts: { ...fixedCounts, ...assessment.counts },
     totalDistance: assessment.totalDistance,
     backtracking: assessment.backtracking,
     objective: assessment.objective
