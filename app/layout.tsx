@@ -3,6 +3,7 @@ import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import "./rules.css";
 import "./servicem8.css";
+import "./commercial.css";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -15,8 +16,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Same Day Intelligent Dispatch",
-  description: "Intelligent technician routing for Same Day Home Services.",
+  title: "Auto Route for ServiceM8",
+  description: "Intelligent technician dispatch and route planning for ServiceM8 businesses.",
   other: {
     "codex-preview": "development",
   },
