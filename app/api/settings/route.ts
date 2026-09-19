@@ -22,12 +22,20 @@ type SharedTechnicianOverride = {
   shiftHours?: number;
 };
 
+type CustomSkillRule = {
+  skill: string;
+  keywords: string[];
+  enabled?: boolean;
+  tool?: string;
+};
+
 type SharedSettings = {
   version: number;
   centralCoastEnabled: boolean;
   centralCoastRoutingEnabled?: boolean;
   tools: string[];
   technicianOverrides: SharedTechnicianOverride[];
+  customSkillRules: CustomSkillRule[];
   updatedAt?: string;
 };
 
@@ -45,10 +53,11 @@ const DEFAULT_TOOLS = [
 ];
 
 const DEFAULT_SETTINGS: SharedSettings = {
-  version: 1,
+  version: 3,
   centralCoastEnabled: true,
   tools: DEFAULT_TOOLS,
-  technicianOverrides: []
+  technicianOverrides: [],
+  customSkillRules: []
 };
 
 const SETTINGS_FILE = process.env.AUTO_ROUTE_SETTINGS_FILE || "/tmp/auto-route-settings.json";
@@ -78,13 +87,26 @@ function cleanWorkDays(values: unknown): number[] {
   return days.length ? days : [1, 2, 3, 4, 5];
 }
 
+function cleanCustomSkillRules(values: unknown): CustomSkillRule[] {
+  if (!Array.isArray(values)) return [];
+  return values.map(value => {
+    const rule = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+    return {
+      skill: String(rule.skill || "").trim(),
+      keywords: cleanList(rule.keywords),
+      enabled: rule.enabled !== false,
+      tool: String(rule.tool || "").trim(),
+    };
+  }).filter(rule => rule.skill && rule.keywords.length);
+}
+
 function normalise(settings: Partial<SharedSettings>): SharedSettings {
   const tools = cleanList(settings.tools);
   const centralCoastValue = typeof settings.centralCoastRoutingEnabled === "boolean"
     ? settings.centralCoastRoutingEnabled
     : settings.centralCoastEnabled;
   return {
-    version: 2,
+    version: 3,
     centralCoastEnabled: centralCoastValue !== false,
     tools: tools.length ? tools : DEFAULT_TOOLS,
     technicianOverrides: Array.isArray(settings.technicianOverrides)
@@ -108,6 +130,7 @@ function normalise(settings: Partial<SharedSettings>): SharedSettings {
         };
         }).filter(tech => tech.id && tech.name)
       : [],
+    customSkillRules: cleanCustomSkillRules(settings.customSkillRules),
     updatedAt: settings.updatedAt
   };
 }

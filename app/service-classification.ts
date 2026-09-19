@@ -6,6 +6,13 @@ export type ServiceClassification = {
   duration: number;
 };
 
+export type CustomSkillRule = {
+  skill: string;
+  keywords: string[];
+  enabled?: boolean;
+  tool?: string;
+};
+
 type ServiceM8JobText = Record<string, unknown>;
 
 type IncomingRoutingJobText = {
@@ -26,11 +33,50 @@ function searchableJobText(job: ServiceM8JobText) {
   ].map(value => String(value || "")).join(" ");
 }
 
-export function classifyServiceM8Job(job: ServiceM8JobText): ServiceClassification {
+function normaliseMatchText(value: unknown) {
+  return String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function cleanCustomRules(values: unknown): CustomSkillRule[] {
+  if (!Array.isArray(values)) return [];
+  return values.map(value => {
+    const rule = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+    const keywords = Array.isArray(rule.keywords)
+      ? Array.from(new Set(rule.keywords.map(item => String(item || "").trim()).filter(Boolean)))
+      : [];
+    return {
+      skill: String(rule.skill || "").trim(),
+      keywords,
+      enabled: rule.enabled !== false,
+      tool: String(rule.tool || "").trim(),
+    };
+  }).filter(rule => rule.skill && rule.keywords.length);
+}
+
+function customRuleClassification(job: ServiceM8JobText, text: string, customRules: CustomSkillRule[]) {
+  // These owner-defined rules are for Quote Routing. Work Order classification
+  // remains on the existing Work Order engine and its dedicated skills logic.
+  if (/work\s*order/i.test(String(job.status || ""))) return null;
+  const haystack = ` ${normaliseMatchText(text)} `;
+  const rule = cleanCustomRules(customRules).find(item => item.enabled !== false && item.keywords.some(keyword => {
+    const needle = normaliseMatchText(keyword);
+    return needle && haystack.includes(` ${needle} `);
+  }));
+  if (!rule) return null;
+  return {
+    service: rule.skill,
+    skill: rule.skill,
+    tool: rule.tool || "",
+    priority: "Standard" as const,
+    duration: 90,
+  };
+}
+
+export function classifyServiceM8Job(job: ServiceM8JobText, customRules: CustomSkillRule[] = []): ServiceClassification {
   const text = searchableJobText(job);
 
-  // Specific services must be checked before broader words such as "roof",
-  // "gutter", "drain", "shower" or "leak".
+  // Existing specific service rules stay first so the proven specialist
+  // classifications continue to win over broader words.
   if (/shower\s*screen|frameless\s+(?:glass|screen)|semi[-\s]*frameless|bath\s*screen/i.test(text)) {
     return { service: "Shower screen", skill: "Shower Screens", tool: "", priority: "Standard", duration: 90 };
   }
@@ -53,8 +99,8 @@ export function classifyServiceM8Job(job: ServiceM8JobText): ServiceClassificati
     return { service: "Bathroom renovation plumbing", skill: "Bathroom Renovation Plumbing", tool: "", priority: "Standard", duration: 180 };
   }
 
-  // Same-day emergency rules are kept unchanged, with hot-water installation
-  // separated from hot-water repair so the configured skills are meaningful.
+  // Same-day emergency rules remain above anything owner-configurable so a
+  // custom phrase can never accidentally downgrade an urgent job.
   if (/(?:blocked|blockage|block).{0,28}(?:drain|toilet)|(?:drain|toilet).{0,28}(?:blocked|blockage)/i.test(text)) {
     return { service: "Blocked drain or toilet", skill: "Blocked Drains", tool: "High-pressure jetter", priority: "Urgent", duration: 90 };
   }
@@ -70,6 +116,13 @@ export function classifyServiceM8Job(job: ServiceM8JobText): ServiceClassificati
   if (/gas.{0,24}leak|leak.{0,24}gas/i.test(text)) {
     return { service: "Gas leak", skill: "Gas", tool: "Gas testing equipment", priority: "Urgent", duration: 90 };
   }
+
+  // Owner-defined rules sit before the broad fallbacks below. This lets Ayman
+  // teach Auto Route a new skill such as "Cooktop Installation" without
+  // rewriting the existing classifier. A matching custom rule only changes
+  // the required skill; the existing routing engine still chooses the tech.
+  const custom = customRuleClassification(job, text, customRules);
+  if (custom) return custom;
 
   if (/\broof(?:s|ing)?\b|flashing|ridge\s*capp?ing|whirlybird/i.test(text)) {
     return { service: "Roofing", skill: "Roofing", tool: "Roofing equipment", priority: "Standard", duration: 120 };
